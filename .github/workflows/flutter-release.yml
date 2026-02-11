@@ -1,0 +1,55 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release Version (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2.14.0
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+          cache: true
+          architecture: x64
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Create new Flutter project (if not exists)
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "Creating new Flutter project..."
+            flutter create --org com.example.myapp .
+          else
+            echo "Existing Flutter project detected."
+          fi
+
+      - name: Run tests
+        run: flutter test
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
+          tag_name: v${{ github.event.inputs.release_version }}
+          name: Release v${{ github.event.inputs.release_version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
