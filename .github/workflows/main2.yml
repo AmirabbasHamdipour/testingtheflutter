@@ -1,0 +1,115 @@
+name: Flutter Android Release Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release Version (e.g., 1.0.0)'
+        required: false
+        default: '1.0.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) Checkout project
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) Setup Flutter
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2.14.0
+        with:
+          flutter-version: '3.x'
+          channel: stable
+          cache: true
+          cache-key: flutter-:os:-:channel:-:version:-:arch:
+          pub-cache-key: flutter-pub:os:-:channel:-:version:-:arch:
+
+      # 3) Check if project exists, create if not
+      - name: Check or create Flutter project
+        id: flutter_project
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            echo "project_exists=true" >> $GITHUB_OUTPUT
+            echo "project_dir=." >> $GITHUB_OUTPUT
+            echo "Existing Flutter project detected."
+          else
+            echo "project_exists=false" >> $GITHUB_OUTPUT
+            echo "project_dir=." >> $GITHUB_OUTPUT
+            echo "Creating new Flutter project..."
+            flutter create --org com.example.myapp .
+          fi
+
+      # 4) Install dependencies
+      - name: Install dependencies
+        run: |
+          cd ${{ steps.flutter_project.outputs.project_dir }}
+          flutter pub get
+
+      # 5) Run tests
+      - name: Run tests
+        run: |
+          cd ${{ steps.flutter_project.outputs.project_dir }}
+          flutter test
+
+      # 6) Build Release APK
+      - name: Build Release APK
+        run: |
+          cd ${{ steps.flutter_project.outputs.project_dir }}
+          flutter build apk --release
+
+      # 7) Upload APK as artifact
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-app-release-apk
+          path: ${{ steps.flutter_project.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only run on push to main (not on pull requests) OR when manually triggered
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      # 1) Download APK artifact
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-app-release-apk
+
+      # 2) Setup version
+      - name: Setup version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.release_version }}"
+          else
+            # Get version from pubspec.yaml if exists, else use timestamp
+            if [ -f "pubspec.yaml" ]; then
+              VERSION=$(grep 'version:' pubspec.yaml | head -1 | awk '{print $2}' | sed 's/+.*//')
+            else
+              VERSION="$(date +'%Y.%m.%d.%H%M%S')"
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      # 3) Create Release
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: app-release.apk
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Flutter Release ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
