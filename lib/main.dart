@@ -614,12 +614,33 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  // --- اضافه شده: ایجاد چت خصوصی ---
+  Future<Map<String, dynamic>> createPrivateChat(int userId) async {
+    final res = await _api.createPrivateChat(userId);
+    await loadChats(); // به‌روزرسانی لیست چت‌ها
+    return res;
+  }
+
+  // --- اضافه شده: ایجاد گروه ---
+  Future<Map<String, dynamic>> createGroup(String title, {bool isPublic = false}) async {
+    final res = await _api.createGroup(title, isPublic: isPublic);
+    await loadChats();
+    return res;
+  }
+
+  // --- اضافه شده: ایجاد کانال ---
+  Future<Map<String, dynamic>> createChannel(String title, {bool isPublic = false}) async {
+    final res = await _api.createChannel(title, isPublic: isPublic);
+    await loadChats();
+    return res;
+  }
+
   Future<void> sendMessage(int chatId, {String? text, File? media}) async {
     try {
       final res = await _api.sendMessage(chatId, content: text, media: media);
       final message = Message.fromJson({
         'id': res['message_id'],
-        'sender_id': ApiService().token, // will be replaced later
+        'sender_id': await _api.getUserId(), // اصلاح شده
         'sender_name': 'You',
         'content': text,
         'media_path': null, // we need to fetch
@@ -679,7 +700,7 @@ class ChatProvider extends ChangeNotifier {
   Future<void> markRead(int chatId, int messageId) async {
     await _api.markRead(messageId);
     // update read receipt locally
-    final currentUserId = await ApiService().getUserId();
+    final currentUserId = await _api.getUserId();
     if (currentUserId != null) {
       final index = _messages[chatId]?.indexWhere((m) => m.id == messageId);
       if (index != null && index != -1) {
@@ -1321,6 +1342,7 @@ class NewChatSheet extends StatelessWidget {
         minChildSize: 0.5,
         expand: false,
         builder: (ctx, scrollController) {
+          final auth = Provider.of<AuthProvider>(context, listen: false); // اصلاح شده
           return Container(
             padding: EdgeInsets.all(16),
             child: Column(
@@ -1334,14 +1356,14 @@ class NewChatSheet extends StatelessWidget {
                         up.loadUsers();
                         return Center(child: CircularProgressIndicator());
                       }
-                      final currentUserId = ApiService().token; // not reliable
+                      final currentUserId = auth.currentUser?.id; // اصلاح شده
                       return ListView.separated(
                         controller: scrollController,
                         itemCount: up.users.length,
                         separatorBuilder: (_, __) => Divider(),
                         itemBuilder: (_, i) {
                           final user = up.users[i];
-                          if (user.id == ApiService().getUserId()) return SizedBox.shrink();
+                          if (user.id == currentUserId) return SizedBox.shrink();
                           return ListTile(
                             leading: CircleAvatar(
                               backgroundImage: user.profilePicture != null
@@ -1352,7 +1374,7 @@ class NewChatSheet extends StatelessWidget {
                             title: Text(user.name),
                             subtitle: Text('@${user.username}'),
                             onTap: () async {
-                              Navigator.pop(ctx); // close sheet
+                              Navigator.pop(ctx);
                               final chatProvider = Provider.of<ChatProvider>(context, listen: false);
                               final res = await chatProvider.createPrivateChat(user.id);
                               final chatId = res['chat_id'];
