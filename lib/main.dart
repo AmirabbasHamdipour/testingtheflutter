@@ -8,12 +8,12 @@ import 'package:flutter/material.dart';
 // ------------------------------------------------------------
 // Constants & API Service (pure Dart without http package)
 // ------------------------------------------------------------
-const String baseUrl = 'tweeter.runflare.run';
+const String baseUrl = 'tweeter.runflare.run';  // Replace with your actual server if needed
 const int basePort = 443; // HTTPS
 
 class ApiService {
   final HttpClient _client = HttpClient()
-    ..badCertificateCallback = (X509Certificate cert, String host, int port) => true; // ← corrected property name
+    ..badCertificateCallback = (X509Certificate cert, String host, int port) => true; // ← FIXED
 
   // Helper: make HTTPS request and parse JSON
   Future<Map<String, dynamic>> _request(
@@ -32,6 +32,10 @@ class ApiService {
       final response = await request.close();
       final responseBody = await response.transform(utf8.decoder).join();
       final statusCode = response.statusCode;
+
+      // Debug: print raw response (optional, remove for production)
+      // print('🌐 Status: $statusCode, Body: $responseBody');
+
       final dynamic data = jsonDecode(responseBody);
       if (statusCode >= 200 && statusCode < 300) {
         return {'success': true, 'data': data};
@@ -39,6 +43,7 @@ class ApiService {
         return {'success': false, 'error': data['error'] ?? 'Unknown error'};
       }
     } catch (e) {
+      // In case of non-JSON response or network error
       return {'success': false, 'error': e.toString()};
     }
   }
@@ -177,15 +182,33 @@ class AppStateProvider extends InheritedWidget {
 }
 
 // ------------------------------------------------------------
-// Main App & Entry Point
+// Main App & Entry Point (FIXED: rebuild on state change)
 // ------------------------------------------------------------
 void main() => runApp(MyApp());
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
+  @override
+  _MyAppState createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
   final ApiService api = ApiService();
   final AppState appState = AppState();
 
-  MyApp({Key? key}) : super(key: key);
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild the whole app when appState notifies listeners (login/logout)
+    appState.addListener(() {
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    appState.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
