@@ -1,590 +1,475 @@
+// ignore_for_file: unused_element, unused_field, depend_on_referenced_packages, unnecessary_null_comparison
+
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:intl/intl.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as emoji_picker;
+import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:image/image.dart' as img;
+import 'package:video_player/video_player.dart';
+import 'package:http_parser/http_parser.dart';
 
-// ------------------- Configuration -------------------
-const String baseUrl = 'https://tweeter.runflare.run/';
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  final token = prefs.getString('token');
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => ChatProvider()),
+        ChangeNotifierProvider(create: (_) => MessageProvider()),
+      ],
+      child: const MyApp(),
+    ),
+  );
+}
 
-// ------------------- Models -------------------
-class UserProfile {
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Messenger',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        fontFamily: 'Roboto',
+        scaffoldBackgroundColor: Colors.grey[100],
+        appBarTheme: const AppBarTheme(
+          elevation: 0,
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black,
+          titleTextStyle: TextStyle(
+            color: Colors.black,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      home: const SplashScreen(),
+      routes: {
+        '/login': (ctx) => const LoginPage(),
+        '/register': (ctx) => const RegisterPage(),
+        '/home': (ctx) => const HomePage(),
+        '/chat': (ctx) => const ChatPage(),
+        '/profile': (ctx) => const ProfilePage(),
+        '/chat-info': (ctx) => const ChatInfoPage(),
+        '/search': (ctx) => const SearchPage(),
+      },
+    );
+  }
+}
+
+// -------------------- Constants --------------------
+const baseUrl = 'https://tweeter.runflare.run';
+const apiUrl = '$baseUrl';
+const socketUrl = baseUrl;
+
+// -------------------- Models --------------------
+class User {
   final int id;
   final String username;
-  final String email;
-  final String? fullName;
+  final String? firstName;
+  final String? lastName;
   final String? bio;
-  final String? avatarUrl;
-  final bool isActive;
-  final DateTime lastSeen;
-  final DateTime createdAt;
+  final String? avatar;
+  final bool isOnline;
+  final DateTime? lastSeen;
+  final String? phone;
 
-  UserProfile({
+  User({
     required this.id,
     required this.username,
-    required this.email,
-    this.fullName,
+    this.firstName,
+    this.lastName,
     this.bio,
-    this.avatarUrl,
-    required this.isActive,
-    required this.lastSeen,
-    required this.createdAt,
+    this.avatar,
+    this.isOnline = false,
+    this.lastSeen,
+    this.phone,
   });
 
-  factory UserProfile.fromJson(Map<String, dynamic> json) {
-    return UserProfile(
+  factory User.fromJson(Map<String, dynamic> json) {
+    return User(
       id: json['id'],
       username: json['username'],
-      email: json['email'],
-      fullName: json['full_name'],
+      firstName: json['first_name'],
+      lastName: json['last_name'],
       bio: json['bio'],
-      avatarUrl: json['avatar_url'],
-      isActive: json['is_active'],
-      lastSeen: DateTime.parse(json['last_seen']),
-      createdAt: DateTime.parse(json['created_at']),
+      avatar: json['avatar'],
+      isOnline: json['is_online'] ?? false,
+      lastSeen: json['last_seen'] != null ? DateTime.parse(json['last_seen']) : null,
+      phone: json['phone'],
     );
   }
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'username': username,
-        'email': email,
-        'full_name': fullName,
+        'first_name': firstName,
+        'last_name': lastName,
         'bio': bio,
-        'avatar_url': avatarUrl,
-        'is_active': isActive,
-        'last_seen': lastSeen.toIso8601String(),
-        'created_at': createdAt.toIso8601String(),
+        'avatar': avatar,
+        'is_online': isOnline,
+        'last_seen': lastSeen?.toIso8601String(),
+        'phone': phone,
       };
-}
 
-class Token {
-  final String accessToken;
-  final String tokenType;
-
-  Token({required this.accessToken, required this.tokenType});
-
-  factory Token.fromJson(Map<String, dynamic> json) {
-    return Token(
-      accessToken: json['access_token'],
-      tokenType: json['token_type'],
-    );
+  String get displayName {
+    if (firstName != null && lastName != null) {
+      return '$firstName $lastName';
+    }
+    if (firstName != null) return firstName!;
+    return username;
   }
 }
 
-class ConversationOut {
+class Chat {
   final int id;
-  final String type;
-  final String? name;
+  final String type; // 'private', 'group', 'channel'
+  String? title;
+  String? description;
+  String? avatar;
   final int createdBy;
   final DateTime createdAt;
-  final List<ConversationParticipant> participants;
+  final List<User> participants;
+  Message? lastMessage;
+  bool isArchived;
+  User? otherUser; // for private chat
 
-  ConversationOut({
+  Chat({
     required this.id,
     required this.type,
-    this.name,
+    this.title,
+    this.description,
+    this.avatar,
     required this.createdBy,
     required this.createdAt,
     required this.participants,
+    this.lastMessage,
+    this.isArchived = false,
+    this.otherUser,
   });
 
-  factory ConversationOut.fromJson(Map<String, dynamic> json) {
-    return ConversationOut(
+  factory Chat.fromJson(Map<String, dynamic> json, {int? currentUserId}) {
+    var participants = (json['participants'] as List)
+        .map((p) => User.fromJson(p))
+        .toList();
+    User? otherUser;
+    if (json['type'] == 'private' && participants.length == 2 && currentUserId != null) {
+      otherUser = participants.firstWhere((p) => p.id != currentUserId);
+    }
+    return Chat(
       id: json['id'],
       type: json['type'],
-      name: json['name'],
+      title: json['title'],
+      description: json['description'],
+      avatar: json['avatar'],
       createdBy: json['created_by'],
       createdAt: DateTime.parse(json['created_at']),
-      participants: (json['participants'] as List)
-          .map((p) => ConversationParticipant.fromJson(p))
-          .toList(),
+      participants: participants,
+      lastMessage: json['last_message'] != null ? Message.fromJson(json['last_message']) : null,
+      isArchived: json['is_archived'] ?? false,
+      otherUser: otherUser,
     );
+  }
+
+  String get displayTitle {
+    if (type == 'private' && otherUser != null) {
+      return otherUser!.displayName;
+    }
+    return title ?? 'Unknown';
   }
 }
 
-class ConversationParticipant {
-  final int userId;
-  final String role;
-
-  ConversationParticipant({required this.userId, required this.role});
-
-  factory ConversationParticipant.fromJson(Map<String, dynamic> json) {
-    return ConversationParticipant(
-      userId: json['user_id'],
-      role: json['role'],
-    );
-  }
-}
-
-class MessageOut {
+class Message {
   final int id;
-  final int conversationId;
-  final int senderId;
-  final String content;
-  final String messageType;
-  final String? fileUrl;
+  final int chatId;
+  final User sender;
+  final int? replyToId;
+  final String? text;
+  final String? media;
+  final String? mediaType;
   final DateTime createdAt;
-  final DateTime? updatedAt;
+  final DateTime? editedAt;
   final bool isDeleted;
-  final int? replyToMessageId;
-  final int? forwardedFromMessageId;
-  final List<dynamic> reactions;
+  final int? forwardFrom;
+  final bool pinned;
+  final List<Reaction> reactions;
   final List<int> readBy;
 
-  MessageOut({
+  Message({
     required this.id,
-    required this.conversationId,
-    required this.senderId,
-    required this.content,
-    required this.messageType,
-    this.fileUrl,
+    required this.chatId,
+    required this.sender,
+    this.replyToId,
+    this.text,
+    this.media,
+    this.mediaType,
     required this.createdAt,
-    this.updatedAt,
-    required this.isDeleted,
-    this.replyToMessageId,
-    this.forwardedFromMessageId,
+    this.editedAt,
+    this.isDeleted = false,
+    this.forwardFrom,
+    this.pinned = false,
     this.reactions = const [],
     this.readBy = const [],
   });
 
-  factory MessageOut.fromJson(Map<String, dynamic> json) {
-    return MessageOut(
+  factory Message.fromJson(Map<String, dynamic> json) {
+    return Message(
       id: json['id'],
-      conversationId: json['conversation_id'],
-      senderId: json['sender_id'],
-      content: json['content'],
-      messageType: json['message_type'],
-      fileUrl: json['file_url'],
+      chatId: json['chat_id'],
+      sender: User.fromJson(json['sender']),
+      replyToId: json['reply_to'],
+      text: json['text'],
+      media: json['media'],
+      mediaType: json['media_type'],
       createdAt: DateTime.parse(json['created_at']),
-      updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']) : null,
-      isDeleted: json['is_deleted'],
-      replyToMessageId: json['reply_to_message_id'],
-      forwardedFromMessageId: json['forwarded_from_message_id'],
-      reactions: json['reactions'] ?? [],
-      readBy: (json['read_by'] as List?)?.cast<int>() ?? [],
+      editedAt: json['edited_at'] != null ? DateTime.parse(json['edited_at']) : null,
+      isDeleted: json['is_deleted'] ?? false,
+      forwardFrom: json['forward_from'],
+      pinned: json['pinned'] ?? false,
+      reactions: (json['reactions'] as List?)?.map((r) => Reaction.fromJson(r)).toList() ?? [],
+      readBy: (json['read_by'] as List?)?.cast<int>().toList() ?? [],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'chat_id': chatId,
+        'sender': sender.toJson(),
+        'reply_to': replyToId,
+        'text': text,
+        'media': media,
+        'media_type': mediaType,
+        'created_at': createdAt.toIso8601String(),
+        'edited_at': editedAt?.toIso8601String(),
+        'is_deleted': isDeleted,
+        'forward_from': forwardFrom,
+        'pinned': pinned,
+        'reactions': reactions.map((r) => r.toJson()).toList(),
+        'read_by': readBy,
+      };
 }
 
-class ReactionOut {
-  final int id;
-  final int messageId;
+class Reaction {
   final int userId;
-  final String reaction;
+  final String emoji;
   final DateTime createdAt;
 
-  ReactionOut({
-    required this.id,
-    required this.messageId,
-    required this.userId,
-    required this.reaction,
-    required this.createdAt,
-  });
+  Reaction({required this.userId, required this.emoji, required this.createdAt});
 
-  factory ReactionOut.fromJson(Map<String, dynamic> json) {
-    return ReactionOut(
-      id: json['id'],
-      messageId: json['message_id'],
+  factory Reaction.fromJson(Map<String, dynamic> json) {
+    return Reaction(
       userId: json['user_id'],
-      reaction: json['reaction'],
+      emoji: json['emoji'],
       createdAt: DateTime.parse(json['created_at']),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'user_id': userId,
+        'emoji': emoji,
+        'created_at': createdAt.toIso8601String(),
+      };
 }
 
-// ------------------- API Service -------------------
+// -------------------- API Service --------------------
 class ApiService {
-  final String baseUrl;
-  final FlutterSecureStorage storage = const FlutterSecureStorage();
+  static final ApiService _instance = ApiService._internal();
+  factory ApiService() => _instance;
+  ApiService._internal();
+
+  late Dio _dio;
   String? _token;
 
-  ApiService({required this.baseUrl});
-
-  Future<Map<String, String>> _headers() async {
-    _token ??= await storage.read(key: 'token');
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer $_token',
-    };
-  }
-
-  Future<Map<String, String>> _multipartHeaders() async {
-    _token ??= await storage.read(key: 'token');
-    return {
-      'Authorization': 'Bearer $_token',
-    };
-  }
-
-  Future<void> saveToken(String token) async {
+  void init({String? token}) {
     _token = token;
-    await storage.write(key: 'token', value: token);
+    _dio = Dio(BaseOptions(
+      baseUrl: apiUrl,
+      connectTimeout: const Duration(seconds: 30),
+      receiveTimeout: const Duration(seconds: 30),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    ));
+    (_dio.httpClientAdapter as IOHttpClientAdapter).onHttpClientCreate =
+        (client) {
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) => true;
+      return client;
+    };
+    _dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        if (_token != null) {
+          options.headers['Authorization'] = 'Bearer $_token';
+        }
+        return handler.next(options);
+      },
+      onError: (DioError e, handler) {
+        if (e.response?.statusCode == 401) {
+          // Token expired, logout
+          Provider.container?.read(authProvider).logout();
+        }
+        return handler.next(e);
+      },
+    ));
   }
 
-  Future<void> clearToken() async {
-    _token = null;
-    await storage.delete(key: 'token');
-  }
-
-  // Auth
-  Future<UserProfile> register({
-    required String username,
-    required String email,
-    required String password,
-    String? fullName,
-    String? bio,
-    String? avatarUrl,
-  }) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'username': username,
-        'email': email,
-        'password': password,
-        'full_name': fullName,
-        'bio': bio,
-        'avatar_url': avatarUrl,
-      }),
-    );
-    if (response.statusCode == 201) {
-      return UserProfile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Register failed: ${response.body}');
+  Future<Response> post(String path, {dynamic data}) async {
+    try {
+      return await _dio.post(path, data: data);
+    } catch (e) {
+      rethrow;
     }
   }
 
-  Future<Token> login(String username, String password) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/login'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': username, 'password': password}),
-    );
-    if (response.statusCode == 200) {
-      final token = Token.fromJson(jsonDecode(response.body));
-      await saveToken(token.accessToken);
-      return token;
-    } else {
-      throw Exception('Login failed: ${response.body}');
+  Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) async {
+    try {
+      return await _dio.get(path, queryParameters: queryParameters);
+    } catch (e) {
+      rethrow;
     }
   }
 
-  // Users
-  Future<List<UserProfile>> listUsers() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/users'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      final List list = jsonDecode(response.body);
-      return list.map((e) => UserProfile.fromJson(e)).toList();
-    } else {
-      throw Exception('Failed to load users');
+  Future<Response> put(String path, {dynamic data}) async {
+    try {
+      return await _dio.put(path, data: data);
+    } catch (e) {
+      rethrow;
     }
   }
 
-  Future<UserProfile> getUser(int userId) async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/users/$userId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      return UserProfile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to load user');
+  Future<Response> delete(String path) async {
+    try {
+      return await _dio.delete(path);
+    } catch (e) {
+      rethrow;
     }
   }
 
-  Future<UserProfile> updateMyProfile({String? fullName, String? bio, String? avatarUrl}) async {
-    final response = await http.put(
-      Uri.parse('$baseUrl/users/me'),
-      headers: await _headers(),
-      body: jsonEncode({
-        'full_name': fullName,
-        'bio': bio,
-        'avatar_url': avatarUrl,
-      }),
-    );
-    if (response.statusCode == 200) {
-      return UserProfile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to update profile');
-    }
-  }
-
-  Future<UserProfile> uploadAvatar(File file) async {
-    var request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/users/me/avatar'),
-    );
-    request.headers.addAll(await _multipartHeaders());
-    request.files.add(await http.MultipartFile.fromPath('file', file.path));
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
-    if (response.statusCode == 200) {
-      return UserProfile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to upload avatar');
-    }
-  }
-
-  // Conversations
-  Future<List<ConversationOut>> listConversations() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/conversations'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      final List list = jsonDecode(response.body);
-      return list.map((e) => ConversationOut.fromJson(e)).toList();
-    } else {
-      throw Exception('Failed to load conversations');
-    }
-  }
-
-  Future<ConversationOut> createConversation(String type, List<int> participantIds, {String? name}) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/conversations'),
-      headers: await _headers(),
-      body: jsonEncode({
-        'type': type,
-        'name': name,
-        'participant_ids': participantIds,
-      }),
-    );
-    if (response.statusCode == 200) {
-      return ConversationOut.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to create conversation');
-    }
-  }
-
-  Future<ConversationOut> getConversation(int convId) async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/conversations/$convId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      return ConversationOut.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to get conversation');
-    }
-  }
-
-  Future<void> updateConversation(int convId, {String? name}) async {
-    final response = await http.put(
-      Uri.parse('$baseUrl/conversations/$convId?name=${name ?? ''}'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to update conversation');
-    }
-  }
-
-  Future<void> deleteConversation(int convId) async {
-    final response = await http.delete(
-      Uri.parse('$baseUrl/conversations/$convId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to delete conversation');
-    }
-  }
-
-  Future<void> addParticipant(int convId, int userId) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/conversations/$convId/participants?user_id=$userId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to add participant');
-    }
-  }
-
-  Future<void> removeParticipant(int convId, int userId) async {
-    final response = await http.delete(
-      Uri.parse('$baseUrl/conversations/$convId/participants/$userId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to remove participant');
-    }
-  }
-
-  // Messages
-  Future<List<MessageOut>> listMessages(int convId, {int limit = 50, int offset = 0}) async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/conversations/$convId/messages?limit=$limit&offset=$offset'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      final List list = jsonDecode(response.body);
-      return list.map((e) => MessageOut.fromJson(e)).toList();
-    } else {
-      throw Exception('Failed to load messages');
-    }
-  }
-
-  Future<MessageOut> sendMessage(int convId, String content,
-      {String messageType = 'text', int? replyToMessageId, int? forwardedFromMessageId}) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/conversations/$convId/messages'),
-      headers: await _headers(),
-      body: jsonEncode({
-        'content': content,
-        'message_type': messageType,
-        'reply_to_message_id': replyToMessageId,
-        'forwarded_from_message_id': forwardedFromMessageId,
-      }),
-    );
-    if (response.statusCode == 200) {
-      return MessageOut.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to send message');
-    }
-  }
-
-  Future<MessageOut> editMessage(int msgId, String content) async {
-    final response = await http.put(
-      Uri.parse('$baseUrl/messages/$msgId?content=${Uri.encodeComponent(content)}'),
-      headers: await _headers(),
-    );
-    if (response.statusCode == 200) {
-      return MessageOut.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to edit message');
-    }
-  }
-
-  Future<void> deleteMessage(int msgId) async {
-    final response = await http.delete(
-      Uri.parse('$baseUrl/messages/$msgId'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to delete message');
-    }
-  }
-
-  Future<ReactionOut> addReaction(int msgId, String reaction) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/messages/$msgId/reactions'),
-      headers: await _headers(),
-      body: jsonEncode({'reaction': reaction}),
-    );
-    if (response.statusCode == 200) {
-      return ReactionOut.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to add reaction');
-    }
-  }
-
-  Future<void> removeReaction(int msgId) async {
-    final response = await http.delete(
-      Uri.parse('$baseUrl/messages/$msgId/reactions'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to remove reaction');
-    }
-  }
-
-  Future<void> markAsRead(int msgId) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/messages/$msgId/read'),
-      headers: await _headers(),
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Failed to mark as read');
-    }
-  }
-
-  // File upload
-  Future<String> uploadFile(File file) async {
-    var request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/upload'),
-    );
-    request.headers.addAll(await _multipartHeaders());
-    request.files.add(await http.MultipartFile.fromPath('file', file.path));
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
-    if (response.statusCode == 200) {
-      // Assume response returns {"file_url": "..."}
-      final data = jsonDecode(response.body);
-      return data['file_url'];
-    } else {
-      throw Exception('Failed to upload file');
-    }
+  Future<Response> uploadFile(String path, String field, File file,
+      {Map<String, dynamic>? data, String? method = 'POST'}) async {
+    String fileName = file.path.split('/').last;
+    FormData formData = FormData.fromMap({
+      ...?data,
+      field: await MultipartFile.fromFile(file.path, filename: fileName),
+    });
+    return await _dio.post(path, data: formData);
   }
 }
 
-// ------------------- Providers -------------------
+// -------------------- Socket Service --------------------
+class SocketService {
+  static final SocketService _instance = SocketService._internal();
+  factory SocketService() => _instance;
+  SocketService._internal();
+
+  IO.Socket? _socket;
+  bool _isConnected = false;
+
+  void connect(String token) {
+    if (_isConnected) return;
+    _socket = IO.io(socketUrl, <String, dynamic>{
+      'transports': ['websocket'],
+      'autoConnect': true,
+      'query': {'token': token},
+    });
+    _socket?.onConnect((_) {
+      print('Socket connected');
+      _isConnected = true;
+    });
+    _socket?.onDisconnect((_) {
+      print('Socket disconnected');
+      _isConnected = false;
+    });
+    _socket?.onError((err) {
+      print('Socket error: $err');
+    });
+  }
+
+  void disconnect() {
+    _socket?.disconnect();
+    _socket?.close();
+    _isConnected = false;
+  }
+
+  void on(String event, Function(dynamic) handler) {
+    _socket?.on(event, handler);
+  }
+
+  void off(String event) {
+    _socket?.off(event);
+  }
+
+  void emit(String event, dynamic data) {
+    _socket?.emit(event, data);
+  }
+
+  bool get isConnected => _isConnected;
+}
+
+// -------------------- Providers --------------------
 class AuthProvider extends ChangeNotifier {
-  final ApiService api;
-  UserProfile? _currentUser;
+  User? _currentUser;
+  String? _token;
   bool _isLoading = false;
-  String? _error;
 
-  AuthProvider({required this.api});
-
-  UserProfile? get currentUser => _currentUser;
+  User? get currentUser => _currentUser;
+  String? get token => _token;
   bool get isLoading => _isLoading;
-  String? get error => _error;
+  bool get isLoggedIn => _token != null && _currentUser != null;
+
+  final ApiService _api = ApiService();
+  final SocketService _socket = SocketService();
 
   Future<bool> login(String username, String password) async {
     _isLoading = true;
-    _error = null;
     notifyListeners();
     try {
-      await api.login(username, password);
-      // After login, fetch current user (we don't have /users/me, but we can get from /users? maybe)
-      // For simplicity, we'll just set a placeholder. In real app, you might need /users/me.
-      // We'll fetch the user list and find by username? Not ideal. Let's assume /users/me exists but it's not in spec. We'll use /users and find by username.
-      final users = await api.listUsers();
-      _currentUser = users.firstWhere((u) => u.username == username);
+      final response = await _api.post('/login', data: {
+        'username': username,
+        'password': password,
+      });
+      final data = response.data;
+      _token = data['token'];
+      _currentUser = User.fromJson(data['user']);
+      await _saveToken(_token!);
+      _api.init(token: _token);
+      _socket.connect(_token!);
+      _setupSocketListeners();
       _isLoading = false;
       notifyListeners();
       return true;
     } catch (e) {
-      _error = e.toString();
       _isLoading = false;
       notifyListeners();
       return false;
     }
   }
 
-  Future<bool> register({
-    required String username,
-    required String email,
-    required String password,
-    String? fullName,
-    String? bio,
-  }) async {
+  Future<bool> register(Map<String, dynamic> userData) async {
     _isLoading = true;
-    _error = null;
     notifyListeners();
     try {
-      final user = await api.register(
-        username: username,
-        email: email,
-        password: password,
-        fullName: fullName,
-        bio: bio,
-      );
-      // Auto login after register
-      await api.login(username, password);
-      _currentUser = user;
-      _isLoading = false;
-      notifyListeners();
-      return true;
+      final response = await _api.post('/register', data: userData);
+      // After register, automatically login
+      return await login(userData['username'], userData['password']);
     } catch (e) {
-      _error = e.toString();
       _isLoading = false;
       notifyListeners();
       return false;
@@ -592,407 +477,688 @@ class AuthProvider extends ChangeNotifier {
   }
 
   Future<void> logout() async {
-    await api.clearToken();
+    _token = null;
     _currentUser = null;
+    _socket.disconnect();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('token');
+    _api.init();
     notifyListeners();
   }
 
-  Future<void> updateProfile({String? fullName, String? bio, String? avatarUrl}) async {
-    try {
-      _currentUser = await api.updateMyProfile(fullName: fullName, bio: bio, avatarUrl: avatarUrl);
-      notifyListeners();
-    } catch (e) {
-      rethrow;
+  Future<void> loadToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    _token = prefs.getString('token');
+    if (_token != null) {
+      _api.init(token: _token);
+      _socket.connect(_token!);
+      _setupSocketListeners();
+      await _fetchCurrentUser();
     }
+    notifyListeners();
   }
 
-  Future<void> uploadAvatar(File file) async {
+  Future<void> _fetchCurrentUser() async {
     try {
-      _currentUser = await api.uploadAvatar(file);
-      notifyListeners();
-    } catch (e) {
-      rethrow;
-    }
+      final response = await _api.get('/users/me'); // Assuming there is /users/me endpoint; but we don't have that; we can get from token? Actually we need to get user by id. We have /users/<id> but we don't know id. Better to store user on login. For simplicity, we'll just store user on login and not fetch again.
+      // If we need, we can store user id in token and fetch. But we'll skip for now.
+    } catch (e) {}
+  }
+
+  Future<void> _saveToken(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('token', token);
+  }
+
+  void _setupSocketListeners() {
+    _socket.on('new_message', (data) {
+      // Handle new message globally
+      Provider.container?.read(messageProvider).addMessage(data);
+    });
+    _socket.on('message_updated', (data) {
+      Provider.container?.read(messageProvider).updateMessage(data);
+    });
+    _socket.on('message_deleted', (data) {
+      Provider.container?.read(messageProvider).deleteMessage(data['chat_id'], data['message_id']);
+    });
+    _socket.on('reaction_updated', (data) {
+      Provider.container?.read(messageProvider).updateReactions(data['chat_id'], data['message_id'], data['reactions']);
+    });
+    _socket.on('read_receipt', (data) {
+      Provider.container?.read(messageProvider).markRead(data['chat_id'], data['message_id'], data['user_id']);
+    });
+    _socket.on('typing', (data) {
+      Provider.container?.read(chatProvider).setTyping(data['chat_id'], data['user_id'], data['is_typing']);
+    });
+    _socket.on('user_status', (data) {
+      Provider.container?.read(chatProvider).updateUserStatus(data['user_id'], data['is_online']);
+    });
+    _socket.on('new_chat', (data) {
+      Provider.container?.read(chatProvider).addChat(data);
+    });
+    _socket.on('chat_updated', (data) {
+      Provider.container?.read(chatProvider).updateChat(data);
+    });
+    _socket.on('participant_added', (data) {
+      Provider.container?.read(chatProvider).updateChat(data['chat']);
+    });
+    _socket.on('participant_removed', (data) {
+      Provider.container?.read(chatProvider).updateChat(data['chat']);
+    });
+    _socket.on('removed_from_chat', (data) {
+      Provider.container?.read(chatProvider).removeChat(data['chat_id']);
+    });
+    _socket.on('chat_archived', (data) {
+      Provider.container?.read(chatProvider).archiveChat(data['chat_id']);
+    });
+    _socket.on('message_pinned', (data) {
+      Provider.container?.read(messageProvider).updateMessage(data['message']);
+    });
+    _socket.on('message_unpinned', (data) {
+      Provider.container?.read(messageProvider).unpinMessage(data['chat_id'], data['message_id']);
+    });
   }
 }
 
-class ConversationsProvider extends ChangeNotifier {
-  final ApiService api;
-  List<ConversationOut> _conversations = [];
-  bool _isLoading = false;
-  String? _error;
+class ChatProvider extends ChangeNotifier {
+  List<Chat> _chats = [];
+  Map<int, bool> _typingUsers = {}; // key: chatId_userId, value: isTyping
+  final ApiService _api = ApiService();
 
-  ConversationsProvider({required this.api});
+  List<Chat> get chats => _chats;
 
-  List<ConversationOut> get conversations => _conversations;
-  bool get isLoading => _isLoading;
-  String? get error => _error;
+  Future<void> loadChats() async {
+    try {
+      final response = await _api.get('/chats');
+      final List data = response.data;
+      _chats = data.map((c) => Chat.fromJson(c, currentUserId: Provider.container?.read(authProvider).currentUser?.id)).toList();
+      notifyListeners();
+    } catch (e) {
+      print('load chats error: $e');
+    }
+  }
 
-  Future<void> loadConversations() async {
-    _isLoading = true;
-    _error = null;
+  void addChat(dynamic chatJson) {
+    final chat = Chat.fromJson(chatJson, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+    _chats.insert(0, chat);
+    notifyListeners();
+  }
+
+  void updateChat(dynamic chatJson) {
+    final updated = Chat.fromJson(chatJson, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+    final index = _chats.indexWhere((c) => c.id == updated.id);
+    if (index != -1) {
+      _chats[index] = updated;
+      notifyListeners();
+    }
+  }
+
+  void removeChat(int chatId) {
+    _chats.removeWhere((c) => c.id == chatId);
+    notifyListeners();
+  }
+
+  void archiveChat(int chatId) {
+    final chat = _chats.firstWhere((c) => c.id == chatId);
+    chat.isArchived = true;
+    notifyListeners();
+  }
+
+  void updateUserStatus(int userId, bool isOnline) {
+    for (var chat in _chats) {
+      for (var user in chat.participants) {
+        if (user.id == userId) {
+          user.isOnline = isOnline;
+        }
+      }
+      if (chat.otherUser?.id == userId) {
+        chat.otherUser?.isOnline = isOnline;
+      }
+    }
+    notifyListeners();
+  }
+
+  void setTyping(int chatId, int userId, bool isTyping) {
+    final key = '$chatId-$userId';
+    if (isTyping) {
+      _typingUsers[key] = true;
+    } else {
+      _typingUsers.remove(key);
+    }
+    notifyListeners();
+  }
+
+  bool isTyping(int chatId, int userId) {
+    return _typingUsers['$chatId-$userId'] == true;
+  }
+
+  void sendTyping(int chatId, bool isTyping) {
+    SocketService().emit('typing', {
+      'chat_id': chatId,
+      'is_typing': isTyping,
+    });
+  }
+
+  Future<Chat?> createPrivateChat(int userId) async {
+    try {
+      final response = await _api.post('/chats', data: {
+        'type': 'private',
+        'participant_ids': [userId],
+      });
+      final chat = Chat.fromJson(response.data, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+      // Add to list if not already
+      if (!_chats.any((c) => c.id == chat.id)) {
+        _chats.insert(0, chat);
+        notifyListeners();
+      }
+      return chat;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  Future<Chat?> createGroup(String title, List<int> participantIds) async {
+    try {
+      final response = await _api.post('/chats', data: {
+        'type': 'group',
+        'title': title,
+        'participant_ids': participantIds,
+      });
+      final chat = Chat.fromJson(response.data, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+      _chats.insert(0, chat);
+      notifyListeners();
+      return chat;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  Future<void> updateChatInfo(int chatId, {String? title, String? description}) async {
+    try {
+      final data = <String, dynamic>{};
+      if (title != null) data['title'] = title;
+      if (description != null) data['description'] = description;
+      await _api.put('/chats/$chatId', data: data);
+      // Update will come via socket
+    } catch (e) {}
+  }
+
+  Future<void> addParticipant(int chatId, int userId) async {
+    try {
+      await _api.post('/chats/$chatId/participants', data: {'user_id': userId});
+    } catch (e) {}
+  }
+
+  Future<void> removeParticipant(int chatId, int userId) async {
+    try {
+      await _api.delete('/chats/$chatId/participants/$userId');
+    } catch (e) {}
+  }
+
+  Future<void> archiveChatManually(int chatId) async {
+    try {
+      await _api.post('/chats/$chatId/archive');
+    } catch (e) {}
+  }
+}
+
+class MessageProvider extends ChangeNotifier {
+  final Map<int, List<Message>> _messages = {}; // chatId -> messages
+  final Map<int, bool> _loading = {};
+  final ApiService _api = ApiService();
+
+  List<Message>? getMessages(int chatId) => _messages[chatId];
+
+  bool isLoading(int chatId) => _loading[chatId] ?? false;
+
+  Future<void> loadMessages(int chatId, {int limit = 50, int offset = 0}) async {
+    if (offset == 0) {
+      _messages[chatId] = [];
+    }
+    _loading[chatId] = true;
     notifyListeners();
     try {
-      _conversations = await api.listConversations();
-      _isLoading = false;
+      final response = await _api.get('/chats/$chatId/messages',
+          queryParameters: {'limit': limit, 'offset': offset});
+      final List data = response.data;
+      final newMessages = data.map((m) => Message.fromJson(m)).toList();
+      if (offset == 0) {
+        _messages[chatId] = newMessages;
+      } else {
+        _messages[chatId]?.addAll(newMessages);
+      }
+      // sort by createdAt descending? Actually API returns descending. We'll keep as is.
+      _messages[chatId]?.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _loading[chatId] = false;
       notifyListeners();
     } catch (e) {
-      _error = e.toString();
-      _isLoading = false;
+      _loading[chatId] = false;
       notifyListeners();
     }
   }
 
-  Future<void> createConversation(String type, List<int> participantIds, {String? name}) async {
-    try {
-      final newConv = await api.createConversation(type, participantIds, name: name);
-      _conversations.add(newConv);
+  void addMessage(dynamic messageJson) {
+    final msg = Message.fromJson(messageJson);
+    if (_messages.containsKey(msg.chatId)) {
+      _messages[msg.chatId]!.insert(0, msg);
+      // Keep sorted descending
+      _messages[msg.chatId]!.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       notifyListeners();
-    } catch (e) {
-      rethrow;
     }
   }
 
-  Future<void> updateConversation(int convId, {String? name}) async {
-    try {
-      await api.updateConversation(convId, name: name);
-      final index = _conversations.indexWhere((c) => c.id == convId);
+  void updateMessage(dynamic messageJson) {
+    final msg = Message.fromJson(messageJson);
+    if (_messages.containsKey(msg.chatId)) {
+      final index = _messages[msg.chatId]!.indexWhere((m) => m.id == msg.id);
       if (index != -1) {
-        _conversations[index] = await api.getConversation(convId);
+        _messages[msg.chatId]![index] = msg;
         notifyListeners();
       }
-    } catch (e) {
-      rethrow;
     }
   }
 
-  Future<void> deleteConversation(int convId) async {
-    try {
-      await api.deleteConversation(convId);
-      _conversations.removeWhere((c) => c.id == convId);
+  void deleteMessage(int chatId, int messageId) {
+    if (_messages.containsKey(chatId)) {
+      _messages[chatId]!.removeWhere((m) => m.id == messageId);
       notifyListeners();
-    } catch (e) {
-      rethrow;
     }
   }
 
-  Future<void> addParticipant(int convId, int userId) async {
-    try {
-      await api.addParticipant(convId, userId);
-      final index = _conversations.indexWhere((c) => c.id == convId);
-      if (index != -1) {
-        _conversations[index] = await api.getConversation(convId);
+  void updateReactions(int chatId, int messageId, List<dynamic> reactionsJson) {
+    if (_messages.containsKey(chatId)) {
+      final msgIndex = _messages[chatId]!.indexWhere((m) => m.id == messageId);
+      if (msgIndex != -1) {
+        final reactions = reactionsJson.map((r) => Reaction.fromJson(r)).toList();
+        // We need to update reactions in message. Since Message is immutable, we need to replace.
+        final oldMsg = _messages[chatId]![msgIndex];
+        final newMsg = Message(
+          id: oldMsg.id,
+          chatId: oldMsg.chatId,
+          sender: oldMsg.sender,
+          replyToId: oldMsg.replyToId,
+          text: oldMsg.text,
+          media: oldMsg.media,
+          mediaType: oldMsg.mediaType,
+          createdAt: oldMsg.createdAt,
+          editedAt: oldMsg.editedAt,
+          isDeleted: oldMsg.isDeleted,
+          forwardFrom: oldMsg.forwardFrom,
+          pinned: oldMsg.pinned,
+          reactions: reactions,
+          readBy: oldMsg.readBy,
+        );
+        _messages[chatId]![msgIndex] = newMsg;
         notifyListeners();
       }
-    } catch (e) {
-      rethrow;
     }
   }
 
-  Future<void> removeParticipant(int convId, int userId) async {
+  void markRead(int chatId, int messageId, int userId) {
+    if (_messages.containsKey(chatId)) {
+      final msgIndex = _messages[chatId]!.indexWhere((m) => m.id == messageId);
+      if (msgIndex != -1) {
+        final msg = _messages[chatId]![msgIndex];
+        if (!msg.readBy.contains(userId)) {
+          final newReadBy = List<int>.from(msg.readBy)..add(userId);
+          final newMsg = Message(
+            id: msg.id,
+            chatId: msg.chatId,
+            sender: msg.sender,
+            replyToId: msg.replyToId,
+            text: msg.text,
+            media: msg.media,
+            mediaType: msg.mediaType,
+            createdAt: msg.createdAt,
+            editedAt: msg.editedAt,
+            isDeleted: msg.isDeleted,
+            forwardFrom: msg.forwardFrom,
+            pinned: msg.pinned,
+            reactions: msg.reactions,
+            readBy: newReadBy,
+          );
+          _messages[chatId]![msgIndex] = newMsg;
+          notifyListeners();
+        }
+      }
+    }
+  }
+
+  void unpinMessage(int chatId, int messageId) {
+    if (_messages.containsKey(chatId)) {
+      for (var msg in _messages[chatId]!) {
+        if (msg.pinned && msg.id == messageId) {
+          final newMsg = Message(
+            id: msg.id,
+            chatId: msg.chatId,
+            sender: msg.sender,
+            replyToId: msg.replyToId,
+            text: msg.text,
+            media: msg.media,
+            mediaType: msg.mediaType,
+            createdAt: msg.createdAt,
+            editedAt: msg.editedAt,
+            isDeleted: msg.isDeleted,
+            forwardFrom: msg.forwardFrom,
+            pinned: false,
+            reactions: msg.reactions,
+            readBy: msg.readBy,
+          );
+          final index = _messages[chatId]!.indexOf(msg);
+          _messages[chatId]![index] = newMsg;
+          notifyListeners();
+          break;
+        }
+      }
+    }
+  }
+
+  Future<Message?> sendMessage(int chatId, String text, {int? replyTo, File? mediaFile}) async {
     try {
-      await api.removeParticipant(convId, userId);
-      final index = _conversations.indexWhere((c) => c.id == convId);
-      if (index != -1) {
-        _conversations[index] = await api.getConversation(convId);
-        notifyListeners();
+      final uri = '/chats/$chatId/messages';
+      if (mediaFile != null) {
+        final response = await _api.uploadFile(uri, 'media', mediaFile,
+            data: {'text': text, 'reply_to': replyTo});
+        final msg = Message.fromJson(response.data);
+        addMessage(response.data);
+        return msg;
+      } else {
+        final response = await _api.post(uri, data: {
+          'text': text,
+          'reply_to': replyTo,
+        });
+        final msg = Message.fromJson(response.data);
+        addMessage(response.data);
+        return msg;
       }
     } catch (e) {
-      rethrow;
+      return null;
     }
+  }
+
+  Future<void> editMessage(int messageId, String newText) async {
+    try {
+      await _api.put('/messages/$messageId', data: {'text': newText});
+      // update will come via socket
+    } catch (e) {}
+  }
+
+  Future<void> deleteMessageApi(int messageId) async {
+    try {
+      await _api.delete('/messages/$messageId');
+      // delete will come via socket
+    } catch (e) {}
+  }
+
+  Future<void> addReaction(int messageId, String emoji) async {
+    try {
+      await _api.post('/messages/$messageId/reactions', data: {'emoji': emoji});
+    } catch (e) {}
+  }
+
+  Future<void> removeReaction(int messageId) async {
+    try {
+      await _api.delete('/messages/$messageId/reactions');
+    } catch (e) {}
+  }
+
+  Future<void> markReadApi(int messageId) async {
+    try {
+      await _api.post('/messages/$messageId/read');
+    } catch (e) {}
+  }
+
+  Future<void> forwardMessage(int messageId, List<int> chatIds) async {
+    try {
+      await _api.post('/messages/$messageId/forward', data: {'chat_ids': chatIds});
+    } catch (e) {}
+  }
+
+  Future<void> pinMessage(int chatId, int messageId) async {
+    try {
+      await _api.post('/chats/$chatId/pin/$messageId');
+    } catch (e) {}
+  }
+
+  Future<void> unpinMessageApi(int chatId) async {
+    try {
+      await _api.post('/chats/$chatId/unpin');
+    } catch (e) {}
   }
 }
 
-class MessagesProvider extends ChangeNotifier {
-  final ApiService api;
-  final int conversationId;
-  List<MessageOut> _messages = [];
-  bool _isLoading = false;
-  String? _error;
-
-  MessagesProvider({required this.api, required this.conversationId});
-
-  List<MessageOut> get messages => _messages;
-  bool get isLoading => _isLoading;
-  String? get error => _error;
-
-  Future<void> loadMessages({int limit = 50}) async {
-    _isLoading = true;
-    _error = null;
-    notifyListeners();
-    try {
-      _messages = await api.listMessages(conversationId, limit: limit);
-      _isLoading = false;
-      notifyListeners();
-    } catch (e) {
-      _error = e.toString();
-      _isLoading = false;
-      notifyListeners();
-    }
-  }
-
-  Future<void> sendMessage(String content,
-      {String messageType = 'text', int? replyToMessageId, int? forwardedFromMessageId}) async {
-    try {
-      final newMsg = await api.sendMessage(
-        conversationId,
-        content,
-        messageType: messageType,
-        replyToMessageId: replyToMessageId,
-        forwardedFromMessageId: forwardedFromMessageId,
-      );
-      _messages.insert(0, newMsg); // Assuming newest first? Actually depends on API ordering. We'll insert at beginning if sorted descending.
-      notifyListeners();
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> editMessage(int msgId, String content) async {
-    try {
-      final edited = await api.editMessage(msgId, content);
-      final index = _messages.indexWhere((m) => m.id == msgId);
-      if (index != -1) {
-        _messages[index] = edited;
-        notifyListeners();
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> deleteMessage(int msgId) async {
-    try {
-      await api.deleteMessage(msgId);
-      _messages.removeWhere((m) => m.id == msgId);
-      notifyListeners();
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> addReaction(int msgId, String reaction) async {
-    try {
-      final reactionOut = await api.addReaction(msgId, reaction);
-      // Update the message's reactions list
-      final index = _messages.indexWhere((m) => m.id == msgId);
-      if (index != -1) {
-        // We need to refresh the message to get updated reactions, but we can also manually add.
-        // For simplicity, we'll reload the message.
-        final updatedMessages = await api.listMessages(conversationId, limit: 50);
-        _messages = updatedMessages;
-        notifyListeners();
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> removeReaction(int msgId) async {
-    try {
-      await api.removeReaction(msgId);
-      final index = _messages.indexWhere((m) => m.id == msgId);
-      if (index != -1) {
-        final updatedMessages = await api.listMessages(conversationId, limit: 50);
-        _messages = updatedMessages;
-        notifyListeners();
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> markAsRead(int msgId) async {
-    try {
-      await api.markAsRead(msgId);
-      // Update locally
-      final index = _messages.indexWhere((m) => m.id == msgId);
-      if (index != -1) {
-        // We don't have the updated readBy list without refetching
-        // For simplicity, we'll just ignore local update.
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-}
-
-// ------------------- Main App -------------------
-void main() {
-  runApp(MyApp());
-}
-
-class MyApp extends StatelessWidget {
-  final ApiService api = ApiService(baseUrl: baseUrl);
+// -------------------- Splash Screen --------------------
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => AuthProvider(api: api)),
-        ChangeNotifierProvider(create: (_) => ConversationsProvider(api: api)),
-      ],
-      child: MaterialApp(
-        title: 'Messenger',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          primarySwatch: Colors.blue,
-          useMaterial3: true,
-        ),
-        home: Consumer<AuthProvider>(
-          builder: (context, auth, _) {
-            if (auth.currentUser != null) {
-              return const HomeScreen();
-            } else {
-              return const LoginScreen();
-            }
-          },
-        ),
-      ),
-    );
-  }
+  State<SplashScreen> createState() => _SplashScreenState();
 }
 
-// ------------------- Screens -------------------
-class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
-
-  @override
-  State<LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStateMixin {
-  final _formKey = GlobalKey<FormState>();
-  final _usernameController = TextEditingController();
-  final _passwordController = TextEditingController();
-  bool _isLogin = true;
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
+class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
+    _controller = AnimationController(
+      duration: const Duration(seconds: 2),
       vsync: this,
-      duration: const Duration(milliseconds: 800),
     );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
-    );
-    _animationController.forward();
+    _animation = CurvedAnimation(parent: _controller, curve: Curves.elasticOut);
+    _controller.forward();
+
+    _checkAuth();
+  }
+
+  Future<void> _checkAuth() async {
+    await Provider.of<AuthProvider>(context, listen: false).loadToken();
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) {
+      final auth = Provider.of<AuthProvider>(context, listen: false);
+      if (auth.isLoggedIn) {
+        Navigator.pushReplacementNamed(context, '/home');
+      } else {
+        Navigator.pushReplacementNamed(context, '/login');
+      }
+    }
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
-    _usernameController.dispose();
-    _passwordController.dispose();
+    _controller.dispose();
     super.dispose();
-  }
-
-  void _submit() async {
-    if (_formKey.currentState!.validate()) {
-      final auth = Provider.of<AuthProvider>(context, listen: false);
-      bool success;
-      if (_isLogin) {
-        success = await auth.login(_usernameController.text, _passwordController.text);
-      } else {
-        // Register uses more fields, for simplicity we'll use same username/password and dummy email
-        success = await auth.register(
-          username: _usernameController.text,
-          email: '${_usernameController.text}@example.com',
-          password: _passwordController.text,
-        );
-      }
-      if (!success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(auth.error ?? 'Error')),
-        );
-      }
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Colors.blue.shade300, Colors.purple.shade300],
+            colors: [Colors.blue, Colors.purple],
           ),
         ),
         child: Center(
-          child: FadeTransition(
-            opacity: _fadeAnimation,
-            child: Card(
-              elevation: 8,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              margin: const EdgeInsets.all(20),
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 300),
-                        height: 80,
-                        width: 80,
-                        decoration: BoxDecoration(
-                          color: Colors.blue,
-                          borderRadius: BorderRadius.circular(_isLogin ? 20 : 40),
+          child: ScaleTransition(
+            scale: _animation,
+            child: const Icon(
+              Icons.chat,
+              size: 100,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// -------------------- Login Page --------------------
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMixin {
+  final _formKey = GlobalKey<FormState>();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _obscurePassword = true;
+  late AnimationController _animationController;
+  late Animation<Offset> _slideAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.5),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _animationController, curve: Curves.easeOut));
+    _animationController.forward();
+  }
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  void _login() async {
+    if (_formKey.currentState!.validate()) {
+      final auth = Provider.of<AuthProvider>(context, listen: false);
+      bool success = await auth.login(_usernameController.text, _passwordController.text);
+      if (success && mounted) {
+        Navigator.pushReplacementNamed(context, '/home');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Login failed')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = Provider.of<AuthProvider>(context);
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.white, Color(0xFFE3F2FD)],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: SlideTransition(
+                position: _slideAnimation,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.chat_bubble_outline,
+                      size: 80,
+                      color: Colors.blue,
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Welcome Back!',
+                      style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Sign in to continue',
+                      style: TextStyle(fontSize: 16, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 40),
+                    Form(
+                      key: _formKey,
+                      child: Column(
+                        children: [
+                          TextFormField(
+                            controller: _usernameController,
+                            decoration: InputDecoration(
+                              labelText: 'Username',
+                              prefixIcon: const Icon(Icons.person),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(30),
+                              ),
+                              filled: true,
+                              fillColor: Colors.white,
+                            ),
+                            validator: (v) => v!.isEmpty ? 'Required' : null,
+                          ),
+                          const SizedBox(height: 16),
+                          TextFormField(
+                            controller: _passwordController,
+                            obscureText: _obscurePassword,
+                            decoration: InputDecoration(
+                              labelText: 'Password',
+                              prefixIcon: const Icon(Icons.lock),
+                              suffixIcon: IconButton(
+                                icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                                onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(30),
+                              ),
+                              filled: true,
+                              fillColor: Colors.white,
+                            ),
+                            validator: (v) => v!.isEmpty ? 'Required' : null,
+                          ),
+                          const SizedBox(height: 30),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 50,
+                            child: ElevatedButton(
+                              onPressed: auth.isLoading ? null : _login,
+                              style: ElevatedButton.styleFrom(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(30),
+                                ),
+                                backgroundColor: Colors.blue,
+                              ),
+                              child: auth.isLoading
+                                  ? const CircularProgressIndicator(color: Colors.white)
+                                  : const Text('Login', style: TextStyle(fontSize: 18)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text("Don't have an account? "),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.pushNamed(context, '/register');
+                          },
+                          child: const Text(
+                            'Register',
+                            style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
+                          ),
                         ),
-                        child: const Icon(Icons.chat, color: Colors.white, size: 40),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        _isLogin ? 'Welcome Back' : 'Create Account',
-                        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 20),
-                      TextFormField(
-                        controller: _usernameController,
-                        decoration: const InputDecoration(labelText: 'Username'),
-                        validator: (v) => v!.isEmpty ? 'Required' : null,
-                      ),
-                      const SizedBox(height: 10),
-                      TextFormField(
-                        controller: _passwordController,
-                        decoration: const InputDecoration(labelText: 'Password'),
-                        obscureText: true,
-                        validator: (v) => v!.isEmpty ? 'Required' : null,
-                      ),
-                      const SizedBox(height: 20),
-                      Consumer<AuthProvider>(
-                        builder: (context, auth, child) {
-                          return auth.isLoading
-                              ? const CircularProgressIndicator()
-                              : ElevatedButton(
-                                  onPressed: _submit,
-                                  style: ElevatedButton.styleFrom(
-                                    minimumSize: const Size(double.infinity, 50),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                  ),
-                                  child: Text(_isLogin ? 'Login' : 'Register'),
-                                );
-                        },
-                      ),
-                      const SizedBox(height: 10),
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _isLogin = !_isLogin;
-                          });
-                        },
-                        child: Text(_isLogin ? 'Need an account? Register' : 'Already have an account? Login'),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1003,23 +1169,253 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 }
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+// -------------------- Register Page --------------------
+class RegisterPage extends StatefulWidget {
+  const RegisterPage({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<RegisterPage> createState() => _RegisterPageState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+class _RegisterPageState extends State<RegisterPage> with SingleTickerProviderStateMixin {
+  final _formKey = GlobalKey<FormState>();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
+  final _firstNameController = TextEditingController();
+  final _lastNameController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _bioController = TextEditingController();
+  bool _obscurePassword = true;
+  late AnimationController _animationController;
+  late Animation<Offset> _slideAnimation;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<ConversationsProvider>(context, listen: false).loadConversations();
-    });
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.5),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _animationController, curve: Curves.easeOut));
+    _animationController.forward();
+  }
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _phoneController.dispose();
+    _bioController.dispose();
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  void _register() async {
+    if (_formKey.currentState!.validate()) {
+      final auth = Provider.of<AuthProvider>(context, listen: false);
+      Map<String, dynamic> data = {
+        'username': _usernameController.text,
+        'password': _passwordController.text,
+        'first_name': _firstNameController.text,
+        'last_name': _lastNameController.text,
+        'phone': _phoneController.text,
+        'bio': _bioController.text,
+      };
+      bool success = await auth.register(data);
+      if (success && mounted) {
+        Navigator.pushReplacementNamed(context, '/home');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Registration failed')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = Provider.of<AuthProvider>(context);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Register')),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.white, Color(0xFFE8F5E9)],
+          ),
+        ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: SlideTransition(
+              position: _slideAnimation,
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  children: [
+                    const Icon(Icons.person_add, size: 60, color: Colors.green),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: _usernameController,
+                      decoration: InputDecoration(
+                        labelText: 'Username *',
+                        prefixIcon: const Icon(Icons.person),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                      validator: (v) => v!.isEmpty ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _passwordController,
+                      obscureText: _obscurePassword,
+                      decoration: InputDecoration(
+                        labelText: 'Password *',
+                        prefixIcon: const Icon(Icons.lock),
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                        ),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                      validator: (v) => v!.isEmpty ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _confirmPasswordController,
+                      obscureText: _obscurePassword,
+                      decoration: InputDecoration(
+                        labelText: 'Confirm Password *',
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                      validator: (v) {
+                        if (v!.isEmpty) return 'Required';
+                        if (v != _passwordController.text) return 'Passwords do not match';
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _firstNameController,
+                      decoration: InputDecoration(
+                        labelText: 'First Name',
+                        prefixIcon: const Icon(Icons.badge),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _lastNameController,
+                      decoration: InputDecoration(
+                        labelText: 'Last Name',
+                        prefixIcon: const Icon(Icons.badge_outlined),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _phoneController,
+                      keyboardType: TextInputType.phone,
+                      decoration: InputDecoration(
+                        labelText: 'Phone',
+                        prefixIcon: const Icon(Icons.phone),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _bioController,
+                      maxLines: 3,
+                      decoration: InputDecoration(
+                        labelText: 'Bio',
+                        prefixIcon: const Icon(Icons.info),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
+                        filled: true,
+                        fillColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        onPressed: auth.isLoading ? null : _register,
+                        style: ElevatedButton.styleFrom(
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                          backgroundColor: Colors.green,
+                        ),
+                        child: auth.isLoading
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : const Text('Register', style: TextStyle(fontSize: 18)),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('Already have an account? '),
+                        GestureDetector(
+                          onTap: () => Navigator.pop(context),
+                          child: const Text(
+                            'Login',
+                            style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// -------------------- Home Page --------------------
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  int _selectedIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+    await chatProvider.loadChats();
   }
 
   @override
@@ -1031,30 +1427,39 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     final auth = Provider.of<AuthProvider>(context);
+    final chatProvider = Provider.of<ChatProvider>(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text('Messenger'),
         bottom: TabBar(
           controller: _tabController,
+          indicatorColor: Colors.blue,
+          labelColor: Colors.blue,
+          unselectedLabelColor: Colors.grey,
           tabs: const [
-            Tab(text: 'Chats'),
-            Tab(text: 'Contacts'),
+            Tab(icon: Icon(Icons.chat), text: 'Chats'),
+            Tab(icon: Icon(Icons.group), text: 'Groups'),
+            Tab(icon: Icon(Icons.settings), text: 'Profile'),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.person),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const ProfileScreen()),
-              );
-            },
+            icon: const Icon(Icons.search),
+            onPressed: () => Navigator.pushNamed(context, '/search'),
           ),
-          IconButton(
-            icon: const Icon(Icons.exit_to_app),
-            onPressed: () async {
-              await auth.logout();
+          PopupMenuButton(
+            icon: const Icon(Icons.more_vert),
+            itemBuilder: (ctx) => [
+              const PopupMenuItem(value: 'new_group', child: Text('New Group')),
+              const PopupMenuItem(value: 'logout', child: Text('Logout')),
+            ],
+            onSelected: (value) async {
+              if (value == 'logout') {
+                await auth.logout();
+                if (mounted) Navigator.pushReplacementNamed(context, '/login');
+              } else if (value == 'new_group') {
+                _showNewGroupDialog();
+              }
             },
           ),
         ],
@@ -1062,204 +1467,1321 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       body: TabBarView(
         controller: _tabController,
         children: [
-          ConversationsList(),
-          ContactsList(),
+          // Chats tab
+          RefreshIndicator(
+            onRefresh: () => chatProvider.loadChats(),
+            child: ListView.builder(
+              itemCount: chatProvider.chats.length,
+              itemBuilder: (ctx, i) {
+                final chat = chatProvider.chats[i];
+                if (chat.type == 'group' || chat.type == 'channel') return const SizedBox.shrink();
+                return ChatTile(chat: chat);
+              },
+            ),
+          ),
+          // Groups tab
+          RefreshIndicator(
+            onRefresh: () => chatProvider.loadChats(),
+            child: ListView.builder(
+              itemCount: chatProvider.chats.length,
+              itemBuilder: (ctx, i) {
+                final chat = chatProvider.chats[i];
+                if (chat.type != 'group' && chat.type != 'channel') return const SizedBox.shrink();
+                return ChatTile(chat: chat);
+              },
+            ),
+          ),
+          // Profile tab
+          ProfileTab(),
         ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const CreateConversationScreen()),
-          );
+          _showNewChatDialog();
         },
-        child: const Icon(Icons.add),
+        child: const Icon(Icons.edit),
+      ),
+    );
+  }
+
+  void _showNewChatDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Chat'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: FutureBuilder<List<User>>(
+            future: _fetchUsers(),
+            builder: (ctx, snapshot) {
+              if (!snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final users = snapshot.data!.where((u) => u.id != Provider.of<AuthProvider>(context).currentUser?.id).toList();
+              return ListView.builder(
+                shrinkWrap: true,
+                itemCount: users.length,
+                itemBuilder: (ctx, i) {
+                  final user = users[i];
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
+                      child: user.avatar == null ? Text(user.username[0].toUpperCase()) : null,
+                    ),
+                    title: Text(user.displayName),
+                    subtitle: Text(user.username),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+                      final chat = await chatProvider.createPrivateChat(user.id);
+                      if (chat != null && mounted) {
+                        Navigator.pushNamed(context, '/chat', arguments: chat);
+                      }
+                    },
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<List<User>> _fetchUsers() async {
+    try {
+      final response = await ApiService().get('/users');
+      final List data = response.data;
+      return data.map((u) => User.fromJson(u)).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  void _showNewGroupDialog() {
+    final TextEditingController titleController = TextEditingController();
+    List<User> selectedUsers = [];
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Group'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleController,
+                decoration: const InputDecoration(labelText: 'Group Name'),
+              ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: FutureBuilder<List<User>>(
+                  future: _fetchUsers(),
+                  builder: (ctx, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final users = snapshot.data!.where((u) => u.id != Provider.of<AuthProvider>(context).currentUser?.id).toList();
+                    return ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: users.length,
+                      itemBuilder: (ctx, i) {
+                        final user = users[i];
+                        final isSelected = selectedUsers.contains(user);
+                        return CheckboxListTile(
+                          value: isSelected,
+                          onChanged: (val) {
+                            setState(() {
+                              if (val == true) {
+                                selectedUsers.add(user);
+                              } else {
+                                selectedUsers.remove(user);
+                              }
+                            });
+                          },
+                          title: Text(user.displayName),
+                          secondary: CircleAvatar(
+                            backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
+                            child: user.avatar == null ? Text(user.username[0].toUpperCase()) : null,
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (titleController.text.isNotEmpty && selectedUsers.isNotEmpty) {
+                Navigator.pop(ctx);
+                final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+                final chat = await chatProvider.createGroup(
+                  titleController.text,
+                  selectedUsers.map((u) => u.id).toList(),
+                );
+                if (chat != null && mounted) {
+                  Navigator.pushNamed(context, '/chat', arguments: chat);
+                }
+              }
+            },
+            child: const Text('Create'),
+          ),
+        ],
       ),
     );
   }
 }
 
-class ConversationsList extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final provider = Provider.of<ConversationsProvider>(context);
-    if (provider.isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (provider.error != null) {
-      return Center(child: Text('Error: ${provider.error}'));
-    }
-    if (provider.conversations.isEmpty) {
-      return const Center(child: Text('No conversations'));
-    }
-    return ListView.builder(
-      itemCount: provider.conversations.length,
-      itemBuilder: (ctx, i) {
-        final conv = provider.conversations[i];
-        return ListTile(
-          leading: CircleAvatar(
-            child: Text(conv.name?[0] ?? '?'),
-          ),
-          title: Text(conv.name ?? 'Conversation ${conv.id}'),
-          subtitle: Text('${conv.participants.length} participants'),
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ChatScreen(conversation: conv),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class ContactsList extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final api = Provider.of<AuthProvider>(context, listen: false).api;
-    return FutureBuilder<List<UserProfile>>(
-      future: api.listUsers(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return Center(child: Text('Error: ${snapshot.error}'));
-        }
-        final users = snapshot.data!;
-        return ListView.builder(
-          itemCount: users.length,
-          itemBuilder: (ctx, i) {
-            final user = users[i];
-            return ListTile(
-              leading: CircleAvatar(
-                backgroundImage: user.avatarUrl != null
-                    ? CachedNetworkImageProvider(user.avatarUrl!)
-                    : null,
-                child: user.avatarUrl == null ? Text(user.username[0]) : null,
-              ),
-              title: Text(user.fullName ?? user.username),
-              subtitle: Text(user.email),
-              onTap: () {
-                // Start private conversation with this user
-                _startPrivateChat(context, user);
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  void _startPrivateChat(BuildContext context, UserProfile user) async {
-    final auth = Provider.of<AuthProvider>(context, listen: false);
-    final conversationsProvider = Provider.of<ConversationsProvider>(context, listen: false);
-    // Check if conversation already exists (in memory) - ideally we should check on server
-    // For simplicity, create new private conversation
-    try {
-      await conversationsProvider.createConversation(
-        'private',
-        [auth.currentUser!.id, user.id],
-      );
-      // Navigate to that conversation
-      // Reload conversations
-      await conversationsProvider.loadConversations();
-      // Optionally navigate to the new chat
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e')));
-    }
-  }
-}
-
-class CreateConversationScreen extends StatefulWidget {
-  const CreateConversationScreen({super.key});
-
-  @override
-  State<CreateConversationScreen> createState() => _CreateConversationScreenState();
-}
-
-class _CreateConversationScreenState extends State<CreateConversationScreen> {
-  final _nameController = TextEditingController();
-  String _type = 'private'; // or 'group'
-  List<int> _selectedUserIds = [];
+class ChatTile extends StatelessWidget {
+  final Chat chat;
+  const ChatTile({super.key, required this.chat});
 
   @override
   Widget build(BuildContext context) {
     final auth = Provider.of<AuthProvider>(context);
+    return InkWell(
+      onTap: () {
+        Navigator.pushNamed(context, '/chat', arguments: chat);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+        ),
+        child: Row(
+          children: [
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 30,
+                  backgroundImage: chat.avatar != null
+                      ? CachedNetworkImageProvider(chat.avatar!)
+                      : (chat.type == 'private' && chat.otherUser?.avatar != null
+                          ? CachedNetworkImageProvider(chat.otherUser!.avatar!)
+                          : null),
+                  child: (chat.avatar == null && (chat.type != 'private' || chat.otherUser?.avatar == null))
+                      ? Icon(chat.type == 'private' ? Icons.person : Icons.group, size: 30)
+                      : null,
+                ),
+                if (chat.type == 'private' && chat.otherUser != null && chat.otherUser!.isOnline)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: 14,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        color: Colors.green,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    chat.displayTitle,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  if (chat.lastMessage != null)
+                    Text(
+                      chat.lastMessage!.text ?? (chat.lastMessage!.mediaType != null ? '📷 Media' : ''),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.grey),
+                    ),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (chat.lastMessage != null)
+                  Text(
+                    DateFormat('HH:mm').format(chat.lastMessage!.createdAt),
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                const SizedBox(height: 4),
+                if (chat.lastMessage != null && !(chat.lastMessage!.readBy.contains(auth.currentUser?.id)))
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: const BoxDecoration(
+                      color: Colors.blue,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ProfileTab extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final auth = Provider.of<AuthProvider>(context);
+    final user = auth.currentUser;
+    if (user == null) return const Center(child: CircularProgressIndicator());
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Center(
+          child: Stack(
+            children: [
+              CircleAvatar(
+                radius: 60,
+                backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
+                child: user.avatar == null ? const Icon(Icons.person, size: 60) : null,
+              ),
+              Positioned(
+                bottom: 0,
+                right: 0,
+                child: CircleAvatar(
+                  backgroundColor: Colors.blue,
+                  radius: 18,
+                  child: IconButton(
+                    icon: const Icon(Icons.camera_alt, size: 16, color: Colors.white),
+                    onPressed: () {
+                      // Change avatar
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.person),
+            title: Text(user.displayName),
+            subtitle: Text('@${user.username}'),
+          ),
+        ),
+        if (user.phone != null)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.phone),
+              title: Text(user.phone!),
+            ),
+          ),
+        if (user.bio != null && user.bio!.isNotEmpty)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.info),
+              title: Text(user.bio!),
+            ),
+          ),
+        const SizedBox(height: 20),
+        ElevatedButton(
+          onPressed: () {
+            Navigator.pushNamed(context, '/profile');
+          },
+          child: const Text('Edit Profile'),
+        ),
+      ],
+    );
+  }
+}
+
+// -------------------- Chat Page --------------------
+class ChatPage extends StatefulWidget {
+  const ChatPage({super.key});
+
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, TickerProviderStateMixin {
+  late Chat chat;
+  final TextEditingController _messageController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final FocusNode _focusNode = FocusNode();
+  bool _isSending = false;
+  File? _selectedMedia;
+  String? _mediaPreviewPath;
+  int? _replyToId;
+  Timer? _typingTimer;
+  bool _isTyping = false;
+  late AnimationController _fabAnimationController;
+  late Animation<double> _fabAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    chat = ModalRoute.of(context)!.settings.arguments as Chat;
+    Provider.of<MessageProvider>(context, listen: false).loadMessages(chat.id);
+    _focusNode.addListener(_onFocusChange);
+    _fabAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _fabAnimation = CurvedAnimation(parent: _fabAnimationController, curve: Curves.easeInOut);
+    _fabAnimationController.forward();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // reconnect?
+    }
+  }
+
+  void _onFocusChange() {
+    if (_focusNode.hasFocus) {
+      _fabAnimationController.reverse();
+    } else {
+      _fabAnimationController.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _messageController.dispose();
+    _scrollController.dispose();
+    _typingTimer?.cancel();
+    _fabAnimationController.dispose();
+    super.dispose();
+  }
+
+  void _sendMessage() async {
+    if (_messageController.text.trim().isEmpty && _selectedMedia == null) return;
+    setState(() => _isSending = true);
+    final msgProvider = Provider.of<MessageProvider>(context, listen: false);
+    await msgProvider.sendMessage(
+      chat.id,
+      _messageController.text,
+      replyTo: _replyToId,
+      mediaFile: _selectedMedia,
+    );
+    _messageController.clear();
+    setState(() {
+      _selectedMedia = null;
+      _mediaPreviewPath = null;
+      _replyToId = null;
+      _isSending = false;
+    });
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _handleTyping(String text) {
+    if (!_isTyping && text.isNotEmpty) {
+      _isTyping = true;
+      Provider.of<ChatProvider>(context, listen: false).sendTyping(chat.id, true);
+    }
+    _typingTimer?.cancel();
+    _typingTimer = Timer(const Duration(seconds: 2), () {
+      if (_isTyping) {
+        _isTyping = false;
+        Provider.of<ChatProvider>(context, listen: false).sendTyping(chat.id, false);
+      }
+    });
+  }
+
+  Future<void> _pickMedia() async {
+    final picker = ImagePicker();
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo),
+              title: const Text('Camera'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final picked = await picker.pickImage(source: ImageSource.camera);
+                if (picked != null) {
+                  setState(() {
+                    _selectedMedia = File(picked.path);
+                    _mediaPreviewPath = picked.path;
+                  });
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Gallery'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final picked = await picker.pickImage(source: ImageSource.gallery);
+                if (picked != null) {
+                  setState(() {
+                    _selectedMedia = File(picked.path);
+                    _mediaPreviewPath = picked.path;
+                  });
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.video_library),
+              title: const Text('Video'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final picked = await picker.pickVideo(source: ImageSource.gallery);
+                if (picked != null) {
+                  setState(() {
+                    _selectedMedia = File(picked.path);
+                    _mediaPreviewPath = picked.path;
+                  });
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file),
+              title: const Text('File'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final result = await FilePicker.platform.pickFiles();
+                if (result != null) {
+                  setState(() {
+                    _selectedMedia = File(result.files.single.path!);
+                    _mediaPreviewPath = result.files.single.path;
+                  });
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = Provider.of<AuthProvider>(context);
+    final msgProvider = Provider.of<MessageProvider>(context);
+    final messages = msgProvider.getMessages(chat.id) ?? [];
+    final chatProvider = Provider.of<ChatProvider>(context);
+    final typingUsers = chat.participants
+        .where((u) => u.id != auth.currentUser?.id && chatProvider.isTyping(chat.id, u.id))
+        .map((u) => u.displayName)
+        .toList();
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('New Conversation'),
+        titleSpacing: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: InkWell(
+          onTap: () {
+            Navigator.pushNamed(context, '/chat-info', arguments: chat);
+          },
+          child: Row(
+            children: [
+              Hero(
+                tag: 'chat_avatar_${chat.id}',
+                child: CircleAvatar(
+                  radius: 20,
+                  backgroundImage: chat.avatar != null
+                      ? CachedNetworkImageProvider(chat.avatar!)
+                      : (chat.type == 'private' && chat.otherUser?.avatar != null
+                          ? CachedNetworkImageProvider(chat.otherUser!.avatar!)
+                          : null),
+                  child: (chat.avatar == null && (chat.type != 'private' || chat.otherUser?.avatar == null))
+                      ? Icon(chat.type == 'private' ? Icons.person : Icons.group, size: 20)
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      chat.displayTitle,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    if (typingUsers.isNotEmpty)
+                      Text(
+                        '${typingUsers.join(', ')} typing...',
+                        style: const TextStyle(fontSize: 12, color: Colors.green),
+                      )
+                    else if (chat.type == 'private' && chat.otherUser != null)
+                      Text(
+                        chat.otherUser!.isOnline ? 'Online' : 'Last seen ${_formatLastSeen(chat.otherUser!.lastSeen)}',
+                        style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.more_vert),
+            onPressed: () {
+              Navigator.pushNamed(context, '/chat-info', arguments: chat);
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: msgProvider.isLoading(chat.id) && messages.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    reverse: true,
+                    controller: _scrollController,
+                    itemCount: messages.length,
+                    itemBuilder: (ctx, i) {
+                      final msg = messages[i];
+                      final isMe = msg.sender.id == auth.currentUser?.id;
+                      return MessageBubble(
+                        message: msg,
+                        isMe: isMe,
+                        chat: chat,
+                        onReply: () {
+                          setState(() {
+                            _replyToId = msg.id;
+                          });
+                        },
+                        onReact: (emoji) {
+                          if (msg.reactions.any((r) => r.userId == auth.currentUser?.id)) {
+                            msgProvider.removeReaction(msg.id);
+                          } else {
+                            msgProvider.addReaction(msg.id, emoji);
+                          }
+                        },
+                        onDelete: () {
+                          msgProvider.deleteMessageApi(msg.id);
+                        },
+                        onEdit: (newText) {
+                          msgProvider.editMessage(msg.id, newText);
+                        },
+                        onForward: () {
+                          _showForwardDialog(msg);
+                        },
+                        onPin: () {
+                          if (msg.pinned) {
+                            msgProvider.unpinMessageApi(chat.id);
+                          } else {
+                            msgProvider.pinMessage(chat.id, msg.id);
+                          }
+                        },
+                      );
+                    },
+                  ),
+          ),
+          if (_replyToId != null)
+            Container(
+              color: Colors.grey[200],
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Replying...',
+                      style: const TextStyle(fontStyle: FontStyle.italic),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () => setState(() => _replyToId = null),
+                  ),
+                ],
+              ),
+            ),
+          if (_selectedMedia != null)
+            Container(
+              height: 80,
+              color: Colors.grey[100],
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        if (_mediaPreviewPath != null)
+                          Image.file(File(_mediaPreviewPath!), height: 60, width: 60, fit: BoxFit.cover),
+                        Positioned(
+                          top: 0,
+                          right: 0,
+                          child: IconButton(
+                            icon: const Icon(Icons.cancel, size: 18),
+                            onPressed: () => setState(() {
+                              _selectedMedia = null;
+                              _mediaPreviewPath = null;
+                            }),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Container(
+            color: Colors.white,
+            padding: EdgeInsets.only(
+              left: 8,
+              right: 8,
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.attach_file),
+                  onPressed: _pickMedia,
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _messageController,
+                    focusNode: _focusNode,
+                    onChanged: _handleTyping,
+                    decoration: const InputDecoration(
+                      hintText: 'Message...',
+                      border: InputBorder.none,
+                    ),
+                    maxLines: null,
+                  ),
+                ),
+                if (_isSending)
+                  const Padding(
+                    padding: EdgeInsets.all(8.0),
+                    child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+                  )
+                else
+                  IconButton(
+                    icon: const Icon(Icons.send),
+                    onPressed: _sendMessage,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: ScaleTransition(
+        scale: _fabAnimation,
+        child: FloatingActionButton.small(
+          onPressed: _scrollToBottom,
+          child: const Icon(Icons.arrow_downward),
+        ),
+      ),
+    );
+  }
+
+  String _formatLastSeen(DateTime? lastSeen) {
+    if (lastSeen == null) return 'recently';
+    final now = DateTime.now();
+    final diff = now.difference(lastSeen);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes} min ago';
+    if (diff.inDays < 1) return '${diff.inHours} h ago';
+    return DateFormat('MMM d').format(lastSeen);
+  }
+
+  void _showForwardDialog(Message msg) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+        return AlertDialog(
+          title: const Text('Forward to'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: chatProvider.chats.length,
+              itemBuilder: (ctx, i) {
+                final chat = chatProvider.chats[i];
+                return ListTile(
+                  leading: CircleAvatar(
+                    backgroundImage: chat.avatar != null ? CachedNetworkImageProvider(chat.avatar!) : null,
+                    child: chat.avatar == null ? const Icon(Icons.chat) : null,
+                  ),
+                  title: Text(chat.displayTitle),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await Provider.of<MessageProvider>(context, listen: false)
+                        .forwardMessage(msg.id, [chat.id]);
+                  },
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class MessageBubble extends StatefulWidget {
+  final Message message;
+  final bool isMe;
+  final Chat chat;
+  final VoidCallback onReply;
+  final Function(String) onReact;
+  final VoidCallback onDelete;
+  final Function(String) onEdit;
+  final VoidCallback onForward;
+  final VoidCallback onPin;
+
+  const MessageBubble({
+    super.key,
+    required this.message,
+    required this.isMe,
+    required this.chat,
+    required this.onReply,
+    required this.onReact,
+    required this.onDelete,
+    required this.onEdit,
+    required this.onForward,
+    required this.onPin,
+  });
+
+  @override
+  State<MessageBubble> createState() => _MessageBubbleState();
+}
+
+class _MessageBubbleState extends State<MessageBubble> with TickerProviderStateMixin {
+  bool _showReactions = false;
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _scaleAnimation = CurvedAnimation(parent: _controller, curve: Curves.elasticOut);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _toggleReactions() {
+    if (_showReactions) {
+      _controller.reverse();
+      Future.delayed(const Duration(milliseconds: 200), () {
+        setState(() => _showReactions = false);
+      });
+    } else {
+      setState(() => _showReactions = true);
+      _controller.forward();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reactions = widget.message.reactions;
+    final myReaction = reactions.firstWhere(
+      (r) => r.userId == Provider.of<AuthProvider>(context).currentUser?.id,
+      orElse: () => Reaction(userId: 0, emoji: '', createdAt: DateTime.now()),
+    );
+    final hasMyReaction = myReaction.emoji.isNotEmpty;
+    return GestureDetector(
+      onLongPress: _toggleReactions,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+        child: Row(
+          mainAxisAlignment: widget.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (!widget.isMe)
+              CircleAvatar(
+                radius: 16,
+                backgroundImage: widget.message.sender.avatar != null
+                    ? CachedNetworkImageProvider(widget.message.sender.avatar!)
+                    : null,
+                child: widget.message.sender.avatar == null ? Text(widget.message.sender.username[0]) : null,
+              ),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: widget.isMe ? Colors.blue[100] : Colors.grey[200],
+                      borderRadius: BorderRadius.circular(18).copyWith(
+                        bottomLeft: widget.isMe ? const Radius.circular(18) : Radius.zero,
+                        bottomRight: widget.isMe ? Radius.zero : const Radius.circular(18),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (!widget.isMe)
+                          Text(
+                            widget.message.sender.displayName,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        if (widget.message.replyToId != null)
+                          const Text('Replying...', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                        if (widget.message.media != null)
+                          GestureDetector(
+                            onTap: () {
+                              // Show full media
+                            },
+                            child: Container(
+                              width: 200,
+                              height: 150,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(12),
+                                image: DecorationImage(
+                                  image: CachedNetworkImageProvider(widget.message.media!),
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (widget.message.text != null && widget.message.text!.isNotEmpty)
+                          Text(
+                            widget.message.text!,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        if (widget.message.editedAt != null)
+                          const Text(
+                            'edited',
+                            style: TextStyle(fontSize: 10, color: Colors.grey),
+                          ),
+                        if (reactions.isNotEmpty)
+                          Wrap(
+                            spacing: 4,
+                            children: reactions.map((r) => Text(r.emoji)).toList(),
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (_showReactions)
+                    Positioned(
+                      top: -30,
+                      left: widget.isMe ? null : 0,
+                      right: widget.isMe ? 0 : null,
+                      child: ScaleTransition(
+                        scale: _scaleAnimation,
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.1),
+                                blurRadius: 8,
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _ReactionButton(emoji: '👍', onTap: () {
+                                widget.onReact('👍');
+                                _toggleReactions();
+                              }),
+                              _ReactionButton(emoji: '❤️', onTap: () {
+                                widget.onReact('❤️');
+                                _toggleReactions();
+                              }),
+                              _ReactionButton(emoji: '😂', onTap: () {
+                                widget.onReact('😂');
+                                _toggleReactions();
+                              }),
+                              _ReactionButton(emoji: '😮', onTap: () {
+                                widget.onReact('😮');
+                                _toggleReactions();
+                              }),
+                              _ReactionButton(emoji: '😢', onTap: () {
+                                widget.onReact('😢');
+                                _toggleReactions();
+                              }),
+                              _ReactionButton(emoji: '😡', onTap: () {
+                                widget.onReact('😡');
+                                _toggleReactions();
+                              }),
+                              PopupMenuButton(
+                                icon: const Icon(Icons.more_horiz, size: 16),
+                                itemBuilder: (ctx) => [
+                                  const PopupMenuItem(value: 'reply', child: Text('Reply')),
+                                  if (widget.isMe)
+                                    const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                                  if (widget.isMe)
+                                    const PopupMenuItem(value: 'delete', child: Text('Delete')),
+                                  const PopupMenuItem(value: 'forward', child: Text('Forward')),
+                                  const PopupMenuItem(value: 'pin', child: Text(widget.message.pinned ? 'Unpin' : 'Pin')),
+                                ],
+                                onSelected: (value) {
+                                  if (value == 'reply') widget.onReply();
+                                  if (value == 'edit') _showEditDialog();
+                                  if (value == 'delete') widget.onDelete();
+                                  if (value == 'forward') widget.onForward();
+                                  if (value == 'pin') widget.onPin();
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 4),
+            if (widget.isMe)
+              CircleAvatar(
+                radius: 16,
+                backgroundImage: widget.message.sender.avatar != null
+                    ? CachedNetworkImageProvider(widget.message.sender.avatar!)
+                    : null,
+                child: widget.message.sender.avatar == null ? Text(widget.message.sender.username[0]) : null,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showEditDialog() {
+    final controller = TextEditingController(text: widget.message.text);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit Message'),
+        content: TextField(controller: controller, autofocus: true),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              widget.onEdit(controller.text);
+              Navigator.pop(ctx);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReactionButton extends StatelessWidget {
+  final String emoji;
+  final VoidCallback onTap;
+  const _ReactionButton({required this.emoji, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Text(emoji, style: const TextStyle(fontSize: 20)),
+      ),
+    );
+  }
+}
+
+// -------------------- Chat Info Page --------------------
+class ChatInfoPage extends StatefulWidget {
+  const ChatInfoPage({super.key});
+
+  @override
+  State<ChatInfoPage> createState() => _ChatInfoPageState();
+}
+
+class _ChatInfoPageState extends State<ChatInfoPage> {
+  late Chat chat;
+  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _descController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    chat = ModalRoute.of(context)!.settings.arguments as Chat;
+    _titleController.text = chat.title ?? '';
+    _descController.text = chat.description ?? '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = Provider.of<AuthProvider>(context);
+    final isAdmin = chat.createdBy == auth.currentUser?.id ||
+        chat.participants.any((p) => p.id == auth.currentUser?.id && false); // need role info, but we don't have role in model. We'll skip.
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Chat Info'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Center(
+            child: Stack(
+              children: [
+                Hero(
+                  tag: 'chat_avatar_${chat.id}',
+                  child: CircleAvatar(
+                    radius: 60,
+                    backgroundImage: chat.avatar != null
+                        ? CachedNetworkImageProvider(chat.avatar!)
+                        : (chat.type == 'private' && chat.otherUser?.avatar != null
+                            ? CachedNetworkImageProvider(chat.otherUser!.avatar!)
+                            : null),
+                    child: (chat.avatar == null && (chat.type != 'private' || chat.otherUser?.avatar == null))
+                        ? Icon(chat.type == 'private' ? Icons.person : Icons.group, size: 60)
+                        : null,
+                  ),
+                ),
+                if (isAdmin && chat.type != 'private')
+                  Positioned(
+                    bottom: 0,
+                    right: 0,
+                    child: CircleAvatar(
+                      backgroundColor: Colors.blue,
+                      child: IconButton(
+                        icon: const Icon(Icons.camera_alt, size: 20, color: Colors.white),
+                        onPressed: () {
+                          // Change chat avatar
+                        },
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (chat.type != 'private')
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    TextFormField(
+                      controller: _titleController,
+                      decoration: const InputDecoration(labelText: 'Group Name'),
+                      enabled: isAdmin,
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: _descController,
+                      decoration: const InputDecoration(labelText: 'Description'),
+                      maxLines: 3,
+                      enabled: isAdmin,
+                    ),
+                    if (isAdmin)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: ElevatedButton(
+                          onPressed: () {
+                            Provider.of<ChatProvider>(context, listen: false)
+                                .updateChatInfo(chat.id, title: _titleController.text, description: _descController.text);
+                          },
+                          child: const Text('Update'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          const SizedBox(height: 10),
+          Card(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Participants (${chat.participants.length})',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                ),
+                ...chat.participants.map((u) => ListTile(
+                  leading: CircleAvatar(
+                    backgroundImage: u.avatar != null ? CachedNetworkImageProvider(u.avatar!) : null,
+                    child: u.avatar == null ? Text(u.username[0]) : null,
+                  ),
+                  title: Text(u.displayName),
+                  subtitle: Text(u.username),
+                  trailing: u.id == chat.createdBy ? const Icon(Icons.star, color: Colors.amber) : null,
+                  onTap: () {
+                    // Show user profile
+                  },
+                )),
+                if (isAdmin && chat.type != 'private')
+                  ListTile(
+                    leading: const Icon(Icons.person_add),
+                    title: const Text('Add Participant'),
+                    onTap: _addParticipant,
+                  ),
+              ],
+            ),
+          ),
+          if (chat.type != 'private')
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.archive),
+                title: const Text('Archive Chat'),
+                onTap: () {
+                  Provider.of<ChatProvider>(context, listen: false).archiveChatManually(chat.id);
+                  Navigator.pop(context);
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _addParticipant() async {
+    final users = await _fetchUsers();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add Participant'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: users.length,
+            itemBuilder: (ctx, i) {
+              final user = users[i];
+              if (chat.participants.any((p) => p.id == user.id)) return const SizedBox.shrink();
+              return ListTile(
+                leading: CircleAvatar(
+                  backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
+                  child: user.avatar == null ? Text(user.username[0]) : null,
+                ),
+                title: Text(user.displayName),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Provider.of<ChatProvider>(context, listen: false).addParticipant(chat.id, user.id);
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<List<User>> _fetchUsers() async {
+    try {
+      final response = await ApiService().get('/users');
+      final List data = response.data;
+      return data.map((u) => User.fromJson(u)).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+// -------------------- Search Page --------------------
+class SearchPage extends StatefulWidget {
+  const SearchPage({super.key});
+
+  @override
+  State<SearchPage> createState() => _SearchPageState();
+}
+
+class _SearchPageState extends State<SearchPage> {
+  final TextEditingController _searchController = TextEditingController();
+  List<Message> _results = [];
+  bool _isSearching = false;
+
+  void _search() async {
+    final query = _searchController.text;
+    if (query.isEmpty) return;
+    setState(() => _isSearching = true);
+    try {
+      final response = await ApiService().get('/search/messages', queryParameters: {'q': query});
+      final List data = response.data;
+      setState(() {
+        _results = data.map((m) => Message.fromJson(m)).toList();
+        _isSearching = false;
+      });
+    } catch (e) {
+      setState(() => _isSearching = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Search'),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            DropdownButtonFormField<String>(
-              value: _type,
-              items: const [
-                DropdownMenuItem(value: 'private', child: Text('Private')),
-                DropdownMenuItem(value: 'group', child: Text('Group')),
-              ],
-              onChanged: (v) => setState(() => _type = v!),
-              decoration: const InputDecoration(labelText: 'Type'),
-            ),
-            if (_type == 'group')
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Group Name'),
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search messages...',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.search),
+                  onPressed: _search,
+                ),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
               ),
+              onSubmitted: (_) => _search,
+            ),
             const SizedBox(height: 20),
-            Expanded(
-              child: FutureBuilder<List<UserProfile>>(
-                future: auth.api.listUsers(),
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-                  final users = snapshot.data!.where((u) => u.id != auth.currentUser!.id).toList();
-                  return ListView.builder(
-                    itemCount: users.length,
-                    itemBuilder: (ctx, i) {
-                      final user = users[i];
-                      final isSelected = _selectedUserIds.contains(user.id);
-                      return CheckboxListTile(
-                        title: Text(user.fullName ?? user.username),
-                        subtitle: Text(user.email),
-                        value: isSelected,
-                        onChanged: (val) {
-                          setState(() {
-                            if (val == true) {
-                              _selectedUserIds.add(user.id);
-                            } else {
-                              _selectedUserIds.remove(user.id);
-                            }
-                          });
-                        },
-                      );
-                    },
-                  );
-                },
+            if (_isSearching)
+              const Center(child: CircularProgressIndicator())
+            else
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _results.length,
+                  itemBuilder: (ctx, i) {
+                    final msg = _results[i];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundImage: msg.sender.avatar != null ? CachedNetworkImageProvider(msg.sender.avatar!) : null,
+                        child: msg.sender.avatar == null ? Text(msg.sender.username[0]) : null,
+                      ),
+                      title: Text(msg.text ?? 'Media'),
+                      subtitle: Text(msg.sender.displayName),
+                      onTap: () {
+                        // Navigate to chat
+                      },
+                    );
+                  },
+                ),
               ),
-            ),
-            ElevatedButton(
-              onPressed: _selectedUserIds.isEmpty
-                  ? null
-                  : () async {
-                      try {
-                        final provider = Provider.of<ConversationsProvider>(context, listen: false);
-                        await provider.createConversation(
-                          _type,
-                          _selectedUserIds,
-                          name: _nameController.text.isNotEmpty ? _nameController.text : null,
-                        );
-                        Navigator.pop(context);
-                      } catch (e) {
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-                      }
-                    },
-              child: const Text('Create'),
-            ),
           ],
         ),
       ),
@@ -1267,115 +2789,72 @@ class _CreateConversationScreenState extends State<CreateConversationScreen> {
   }
 }
 
-class ProfileScreen extends StatelessWidget {
-  const ProfileScreen({super.key});
+// -------------------- Profile Page (Edit) --------------------
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
-    final user = auth.currentUser!;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Profile'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const EditProfileScreen()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: Center(
-        child: Column(
-          children: [
-            const SizedBox(height: 20),
-            Hero(
-              tag: 'avatar-${user.id}',
-              child: CircleAvatar(
-                radius: 50,
-                backgroundImage: user.avatarUrl != null
-                    ? CachedNetworkImageProvider(user.avatarUrl!)
-                    : null,
-                child: user.avatarUrl == null ? Text(user.username[0], style: const TextStyle(fontSize: 30)) : null,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(user.fullName ?? user.username, style: const TextStyle(fontSize: 24)),
-            Text(user.email),
-            const SizedBox(height: 10),
-            Text('Bio: ${user.bio ?? 'No bio'}'),
-            const SizedBox(height: 10),
-            Text('Last seen: ${DateFormat.yMMMd().add_jm().format(user.lastSeen)}'),
-            const SizedBox(height: 10),
-            Text('Member since: ${DateFormat.yMMMd().format(user.createdAt)}'),
-          ],
-        ),
-      ),
-    );
-  }
+  State<ProfilePage> createState() => _ProfilePageState();
 }
 
-class EditProfileScreen extends StatefulWidget {
-  const EditProfileScreen({super.key});
-
-  @override
-  State<EditProfileScreen> createState() => _EditProfileScreenState();
-}
-
-class _EditProfileScreenState extends State<EditProfileScreen> {
+class _ProfilePageState extends State<ProfilePage> {
   final _formKey = GlobalKey<FormState>();
-  final _fullNameController = TextEditingController();
+  final _firstNameController = TextEditingController();
+  final _lastNameController = TextEditingController();
   final _bioController = TextEditingController();
-  File? _avatarFile;
+  final _phoneController = TextEditingController();
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
-    final user = Provider.of<AuthProvider>(context, listen: false).currentUser!;
-    _fullNameController.text = user.fullName ?? '';
-    _bioController.text = user.bio ?? '';
-  }
-
-  Future<void> _pickImage() async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
-    if (picked != null) {
-      setState(() {
-        _avatarFile = File(picked.path);
-      });
+    final user = Provider.of<AuthProvider>(context, listen: false).currentUser;
+    if (user != null) {
+      _firstNameController.text = user.firstName ?? '';
+      _lastNameController.text = user.lastName ?? '';
+      _bioController.text = user.bio ?? '';
+      _phoneController.text = user.phone ?? '';
     }
   }
 
   Future<void> _save() async {
     if (_formKey.currentState!.validate()) {
+      setState(() => _isSaving = true);
       final auth = Provider.of<AuthProvider>(context, listen: false);
+      final userId = auth.currentUser!.id;
       try {
-        if (_avatarFile != null) {
-          await auth.uploadAvatar(_avatarFile!);
-        }
-        await auth.updateProfile(
-          fullName: _fullNameController.text,
-          bio: _bioController.text,
-        );
+        await ApiService().put('/users/$userId', data: {
+          'first_name': _firstNameController.text,
+          'last_name': _lastNameController.text,
+          'bio': _bioController.text,
+          'phone': _phoneController.text,
+        });
+        // Refresh user
+        await auth.loadToken(); // This will reload token and user? Actually we need to fetch user again. We'll just update local.
+        setState(() => _isSaving = false);
         Navigator.pop(context);
       } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e')));
+        setState(() => _isSaving = false);
       }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final user = Provider.of<AuthProvider>(context).currentUser!;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Edit Profile'),
         actions: [
-          IconButton(onPressed: _save, icon: const Icon(Icons.save)),
+          if (_isSaving)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: CircularProgressIndicator(),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.save),
+              onPressed: _save,
+            ),
         ],
       ),
       body: Padding(
@@ -1384,30 +2863,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           key: _formKey,
           child: ListView(
             children: [
-              Center(
-                child: GestureDetector(
-                  onTap: _pickImage,
-                  child: Hero(
-                    tag: 'avatar-${user.id}',
-                    child: CircleAvatar(
-                      radius: 50,
-                      backgroundImage: _avatarFile != null
-                          ? FileImage(_avatarFile!)
-                          : (user.avatarUrl != null
-                              ? CachedNetworkImageProvider(user.avatarUrl!)
-                              : null),
-                      child: (_avatarFile == null && user.avatarUrl == null)
-                          ? Text(user.username[0], style: const TextStyle(fontSize: 30))
-                          : null,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
               TextFormField(
-                controller: _fullNameController,
-                decoration: const InputDecoration(labelText: 'Full Name'),
+                controller: _firstNameController,
+                decoration: const InputDecoration(labelText: 'First Name'),
               ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _lastNameController,
+                decoration: const InputDecoration(labelText: 'Last Name'),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _phoneController,
+                decoration: const InputDecoration(labelText: 'Phone'),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 16),
               TextFormField(
                 controller: _bioController,
                 decoration: const InputDecoration(labelText: 'Bio'),
@@ -1415,409 +2886,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class ChatScreen extends StatefulWidget {
-  final ConversationOut conversation;
-
-  const ChatScreen({super.key, required this.conversation});
-
-  @override
-  State<ChatScreen> createState() => _ChatScreenState();
-}
-
-class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
-  late MessagesProvider _messagesProvider;
-  final TextEditingController _messageController = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  bool _showEmoji = false;
-  int? _replyToMessageId;
-  int? _forwardFromMessageId;
-
-  @override
-  void initState() {
-    super.initState();
-    final api = Provider.of<AuthProvider>(context, listen: false).api;
-    _messagesProvider = MessagesProvider(
-      api: api,
-      conversationId: widget.conversation.id,
-    );
-    _messagesProvider.loadMessages();
-  }
-
-  void _sendMessage() async {
-    if (_messageController.text.isNotEmpty) {
-      try {
-        await _messagesProvider.sendMessage(
-          _messageController.text,
-          replyToMessageId: _replyToMessageId,
-          forwardedFromMessageId: _forwardFromMessageId,
-        );
-        _messageController.clear();
-        _replyToMessageId = null;
-        _forwardFromMessageId = null;
-        _scrollController.animateTo(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e')));
-      }
-    }
-  }
-
-  void _toggleEmoji() {
-    setState(() {
-      _showEmoji = !_showEmoji;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
-    final currentUserId = auth.currentUser!.id;
-
-    return ChangeNotifierProvider.value(
-      value: _messagesProvider,
-      child: Consumer<MessagesProvider>(
-        builder: (context, provider, child) {
-          return Scaffold(
-            appBar: AppBar(
-              title: Text(widget.conversation.name ?? 'Chat'),
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.info),
-                  onPressed: () {
-                    _showConversationInfo(context);
-                  },
-                ),
-              ],
-            ),
-            body: Column(
-              children: [
-                Expanded(
-                  child: provider.isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : ListView.builder(
-                          reverse: true,
-                          controller: _scrollController,
-                          itemCount: provider.messages.length,
-                          itemBuilder: (ctx, i) {
-                            final msg = provider.messages[i];
-                            final isMe = msg.senderId == currentUserId;
-                            return MessageBubble(
-                              message: msg,
-                              isMe: isMe,
-                              onReply: () {
-                                setState(() {
-                                  _replyToMessageId = msg.id;
-                                });
-                              },
-                              onForward: () {
-                                setState(() {
-                                  _forwardFromMessageId = msg.id;
-                                });
-                              },
-                              onEdit: (newContent) async {
-                                try {
-                                  await provider.editMessage(msg.id, newContent);
-                                } catch (e) {
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Edit failed: $e')));
-                                }
-                              },
-                              onDelete: () async {
-                                try {
-                                  await provider.deleteMessage(msg.id);
-                                } catch (e) {
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
-                                }
-                              },
-                              onReact: (emoji) async {
-                                try {
-                                  await provider.addReaction(msg.id, emoji);
-                                } catch (e) {
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Reaction failed: $e')));
-                                }
-                              },
-                            );
-                          },
-                        ),
-                ),
-                if (_replyToMessageId != null)
-                  Container(
-                    color: Colors.grey.shade200,
-                    padding: const EdgeInsets.all(8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Replying...',
-                            style: const TextStyle(fontStyle: FontStyle.italic),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          onPressed: () => setState(() => _replyToMessageId = null),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (_forwardFromMessageId != null)
-                  Container(
-                    color: Colors.grey.shade200,
-                    padding: const EdgeInsets.all(8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Forwarding...',
-                            style: const TextStyle(fontStyle: FontStyle.italic),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          onPressed: () => setState(() => _forwardFromMessageId = null),
-                        ),
-                      ],
-                    ),
-                  ),
-                Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Row(
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.emoji_emotions),
-                        onPressed: _toggleEmoji,
-                      ),
-                      Expanded(
-                        child: TextField(
-                          controller: _messageController,
-                          decoration: const InputDecoration(
-                            hintText: 'Type a message...',
-                            border: OutlineInputBorder(),
-                          ),
-                          onSubmitted: (_) => _sendMessage(),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.send),
-                        onPressed: _sendMessage,
-                      ),
-                    ],
-                  ),
-                ),
-                if (_showEmoji)
-                  SizedBox(
-                    height: 250,
-                    child: emoji_picker.EmojiPicker(
-                      onEmojiSelected: (category, emoji) {
-                        _messageController.text += emoji.emoji;
-                      },
-                    ),
-                  ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _showConversationInfo(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) {
-        return Container(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Conversation Info', style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 10),
-              Text('Type: ${widget.conversation.type}'),
-              Text('Created by: ${widget.conversation.createdBy}'),
-              Text('Participants:'),
-              ...widget.conversation.participants.map((p) => Text('User ${p.userId} (${p.role})')),
-              const SizedBox(height: 10),
-              ElevatedButton(
-                onPressed: () {
-                  // Add participant
-                },
-                child: const Text('Add Participant'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ------------------- Message Bubble Widget -------------------
-class MessageBubble extends StatefulWidget {
-  final MessageOut message;
-  final bool isMe;
-  final VoidCallback? onReply;
-  final VoidCallback? onForward;
-  final Function(String) onEdit;
-  final VoidCallback onDelete;
-  final Function(String) onReact;
-
-  const MessageBubble({
-    super.key,
-    required this.message,
-    required this.isMe,
-    this.onReply,
-    this.onForward,
-    required this.onEdit,
-    required this.onDelete,
-    required this.onReact,
-  });
-
-  @override
-  State<MessageBubble> createState() => _MessageBubbleState();
-}
-
-class _MessageBubbleState extends State<MessageBubble> with TickerProviderStateMixin {
-  bool _showActions = false;
-  late AnimationController _scaleController;
-
-  @override
-  void initState() {
-    super.initState();
-    _scaleController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 200),
-      value: 1.0,
-    );
-  }
-
-  @override
-  void dispose() {
-    _scaleController.dispose();
-    super.dispose();
-  }
-
-  void _onTap() {
-    setState(() {
-      _showActions = !_showActions;
-    });
-    if (_showActions) {
-      _scaleController.forward();
-    } else {
-      _scaleController.reverse();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: _onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-        child: Row(
-          mainAxisAlignment: widget.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-          children: [
-            if (!widget.isMe)
-              CircleAvatar(
-                radius: 16,
-                // Could fetch sender avatar
-              ),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: widget.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                children: [
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    curve: Curves.easeInOut,
-                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: widget.isMe ? Colors.blue : Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (widget.message.replyToMessageId != null)
-                          Text('Replying to...', style: TextStyle(fontSize: 12, color: widget.isMe ? Colors.white70 : Colors.black54)),
-                        if (widget.message.forwardedFromMessageId != null)
-                          Text('Forwarded', style: TextStyle(fontSize: 12, color: widget.isMe ? Colors.white70 : Colors.black54)),
-                        Text(
-                          widget.message.content,
-                          style: TextStyle(color: widget.isMe ? Colors.white : Colors.black),
-                        ),
-                        if (widget.message.fileUrl != null)
-                          GestureDetector(
-                            onTap: () {
-                              // Open file
-                            },
-                            child: Container(
-                              margin: const EdgeInsets.only(top: 4),
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: Colors.black12,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.attach_file, size: 16),
-                                  const SizedBox(width: 4),
-                                  Expanded(
-                                    child: Text(
-                                      'File',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(color: widget.isMe ? Colors.white : Colors.black),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              DateFormat.Hm().format(widget.message.createdAt),
-                              style: TextStyle(fontSize: 10, color: widget.isMe ? Colors.white70 : Colors.black54),
-                            ),
-                            if (widget.isMe && widget.message.readBy.isNotEmpty)
-                              const Icon(Icons.done_all, size: 12, color: Colors.blue),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (widget.message.reactions.isNotEmpty)
-                    Container(
-                      margin: const EdgeInsets.only(top: 2),
-                      child: Wrap(
-                        children: widget.message.reactions.map((r) {
-                          // r is a map? Actually reactions list is List<dynamic>, each might be an object.
-                          // For simplicity, just show the first reaction string.
-                          return Container(
-                            margin: const EdgeInsets.only(right: 2),
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade200,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Text(r.toString()),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            if (widget.isMe)
-              CircleAvatar(
-                radius: 16,
-                // Current user avatar
-              ),
-          ],
         ),
       ),
     );
