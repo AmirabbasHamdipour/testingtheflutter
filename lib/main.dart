@@ -1,5 +1,6 @@
 // ignore_for_file: unused_element, unused_field, depend_on_referenced_packages, unnecessary_null_comparison
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -19,17 +20,31 @@ import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as img;
 import 'package:video_player/video_player.dart';
 import 'package:http_parser/http_parser.dart';
+import 'package:get_it/get_it.dart';
+
+final getIt = GetIt.instance;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
   final token = prefs.getString('token');
+
+  // Create providers
+  final authProvider = AuthProvider();
+  final chatProvider = ChatProvider();
+  final messageProvider = MessageProvider();
+
+  // Register in GetIt
+  getIt.registerSingleton<AuthProvider>(authProvider);
+  getIt.registerSingleton<ChatProvider>(chatProvider);
+  getIt.registerSingleton<MessageProvider>(messageProvider);
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => AuthProvider()),
-        ChangeNotifierProvider(create: (_) => ChatProvider()),
-        ChangeNotifierProvider(create: (_) => MessageProvider()),
+        ChangeNotifierProvider.value(value: authProvider),
+        ChangeNotifierProvider.value(value: chatProvider),
+        ChangeNotifierProvider.value(value: messageProvider),
       ],
       child: const MyApp(),
     ),
@@ -86,8 +101,8 @@ class User {
   final String? lastName;
   final String? bio;
   final String? avatar;
-  final bool isOnline;
-  final DateTime? lastSeen;
+  bool isOnline; // now mutable
+  DateTime? lastSeen; // now mutable
   final String? phone;
 
   User({
@@ -323,7 +338,7 @@ class ApiService {
       onError: (DioError e, handler) {
         if (e.response?.statusCode == 401) {
           // Token expired, logout
-          Provider.container?.read(authProvider).logout();
+          getIt<AuthProvider>().logout();
         }
         return handler.next(e);
       },
@@ -499,10 +514,7 @@ class AuthProvider extends ChangeNotifier {
   }
 
   Future<void> _fetchCurrentUser() async {
-    try {
-      final response = await _api.get('/users/me'); // Assuming there is /users/me endpoint; but we don't have that; we can get from token? Actually we need to get user by id. We have /users/<id> but we don't know id. Better to store user on login. For simplicity, we'll just store user on login and not fetch again.
-      // If we need, we can store user id in token and fetch. But we'll skip for now.
-    } catch (e) {}
+    // If needed, implement fetch user by id. For now, skip.
   }
 
   Future<void> _saveToken(String token) async {
@@ -512,57 +524,56 @@ class AuthProvider extends ChangeNotifier {
 
   void _setupSocketListeners() {
     _socket.on('new_message', (data) {
-      // Handle new message globally
-      Provider.container?.read(messageProvider).addMessage(data);
+      getIt<MessageProvider>().addMessage(data);
     });
     _socket.on('message_updated', (data) {
-      Provider.container?.read(messageProvider).updateMessage(data);
+      getIt<MessageProvider>().updateMessage(data);
     });
     _socket.on('message_deleted', (data) {
-      Provider.container?.read(messageProvider).deleteMessage(data['chat_id'], data['message_id']);
+      getIt<MessageProvider>().deleteMessage(data['chat_id'], data['message_id']);
     });
     _socket.on('reaction_updated', (data) {
-      Provider.container?.read(messageProvider).updateReactions(data['chat_id'], data['message_id'], data['reactions']);
+      getIt<MessageProvider>().updateReactions(data['chat_id'], data['message_id'], data['reactions']);
     });
     _socket.on('read_receipt', (data) {
-      Provider.container?.read(messageProvider).markRead(data['chat_id'], data['message_id'], data['user_id']);
+      getIt<MessageProvider>().markRead(data['chat_id'], data['message_id'], data['user_id']);
     });
     _socket.on('typing', (data) {
-      Provider.container?.read(chatProvider).setTyping(data['chat_id'], data['user_id'], data['is_typing']);
+      getIt<ChatProvider>().setTyping(data['chat_id'], data['user_id'], data['is_typing']);
     });
     _socket.on('user_status', (data) {
-      Provider.container?.read(chatProvider).updateUserStatus(data['user_id'], data['is_online']);
+      getIt<ChatProvider>().updateUserStatus(data['user_id'], data['is_online']);
     });
     _socket.on('new_chat', (data) {
-      Provider.container?.read(chatProvider).addChat(data);
+      getIt<ChatProvider>().addChat(data);
     });
     _socket.on('chat_updated', (data) {
-      Provider.container?.read(chatProvider).updateChat(data);
+      getIt<ChatProvider>().updateChat(data);
     });
     _socket.on('participant_added', (data) {
-      Provider.container?.read(chatProvider).updateChat(data['chat']);
+      getIt<ChatProvider>().updateChat(data['chat']);
     });
     _socket.on('participant_removed', (data) {
-      Provider.container?.read(chatProvider).updateChat(data['chat']);
+      getIt<ChatProvider>().updateChat(data['chat']);
     });
     _socket.on('removed_from_chat', (data) {
-      Provider.container?.read(chatProvider).removeChat(data['chat_id']);
+      getIt<ChatProvider>().removeChat(data['chat_id']);
     });
     _socket.on('chat_archived', (data) {
-      Provider.container?.read(chatProvider).archiveChat(data['chat_id']);
+      getIt<ChatProvider>().archiveChat(data['chat_id']);
     });
     _socket.on('message_pinned', (data) {
-      Provider.container?.read(messageProvider).updateMessage(data['message']);
+      getIt<MessageProvider>().updateMessage(data['message']);
     });
     _socket.on('message_unpinned', (data) {
-      Provider.container?.read(messageProvider).unpinMessage(data['chat_id'], data['message_id']);
+      getIt<MessageProvider>().unpinMessage(data['chat_id'], data['message_id']);
     });
   }
 }
 
 class ChatProvider extends ChangeNotifier {
   List<Chat> _chats = [];
-  Map<int, bool> _typingUsers = {}; // key: chatId_userId, value: isTyping
+  Map<String, bool> _typingUsers = {}; // key: "chatId-userId"
   final ApiService _api = ApiService();
 
   List<Chat> get chats => _chats;
@@ -571,7 +582,7 @@ class ChatProvider extends ChangeNotifier {
     try {
       final response = await _api.get('/chats');
       final List data = response.data;
-      _chats = data.map((c) => Chat.fromJson(c, currentUserId: Provider.container?.read(authProvider).currentUser?.id)).toList();
+      _chats = data.map((c) => Chat.fromJson(c, currentUserId: getIt<AuthProvider>().currentUser?.id)).toList();
       notifyListeners();
     } catch (e) {
       print('load chats error: $e');
@@ -579,13 +590,13 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void addChat(dynamic chatJson) {
-    final chat = Chat.fromJson(chatJson, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+    final chat = Chat.fromJson(chatJson, currentUserId: getIt<AuthProvider>().currentUser?.id);
     _chats.insert(0, chat);
     notifyListeners();
   }
 
   void updateChat(dynamic chatJson) {
-    final updated = Chat.fromJson(chatJson, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+    final updated = Chat.fromJson(chatJson, currentUserId: getIt<AuthProvider>().currentUser?.id);
     final index = _chats.indexWhere((c) => c.id == updated.id);
     if (index != -1) {
       _chats[index] = updated;
@@ -645,7 +656,7 @@ class ChatProvider extends ChangeNotifier {
         'type': 'private',
         'participant_ids': [userId],
       });
-      final chat = Chat.fromJson(response.data, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+      final chat = Chat.fromJson(response.data, currentUserId: getIt<AuthProvider>().currentUser?.id);
       // Add to list if not already
       if (!_chats.any((c) => c.id == chat.id)) {
         _chats.insert(0, chat);
@@ -664,7 +675,7 @@ class ChatProvider extends ChangeNotifier {
         'title': title,
         'participant_ids': participantIds,
       });
-      final chat = Chat.fromJson(response.data, currentUserId: Provider.container?.read(authProvider).currentUser?.id);
+      final chat = Chat.fromJson(response.data, currentUserId: getIt<AuthProvider>().currentUser?.id);
       _chats.insert(0, chat);
       notifyListeners();
       return chat;
@@ -727,7 +738,7 @@ class MessageProvider extends ChangeNotifier {
       } else {
         _messages[chatId]?.addAll(newMessages);
       }
-      // sort by createdAt descending? Actually API returns descending. We'll keep as is.
+      // sort by createdAt descending
       _messages[chatId]?.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _loading[chatId] = false;
       notifyListeners();
@@ -741,7 +752,6 @@ class MessageProvider extends ChangeNotifier {
     final msg = Message.fromJson(messageJson);
     if (_messages.containsKey(msg.chatId)) {
       _messages[msg.chatId]!.insert(0, msg);
-      // Keep sorted descending
       _messages[msg.chatId]!.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       notifyListeners();
     }
@@ -770,7 +780,6 @@ class MessageProvider extends ChangeNotifier {
       final msgIndex = _messages[chatId]!.indexWhere((m) => m.id == messageId);
       if (msgIndex != -1) {
         final reactions = reactionsJson.map((r) => Reaction.fromJson(r)).toList();
-        // We need to update reactions in message. Since Message is immutable, we need to replace.
         final oldMsg = _messages[chatId]![msgIndex];
         final newMsg = Message(
           id: oldMsg.id,
@@ -953,10 +962,10 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   }
 
   Future<void> _checkAuth() async {
-    await Provider.of<AuthProvider>(context, listen: false).loadToken();
+    await getIt<AuthProvider>().loadToken();
     await Future.delayed(const Duration(seconds: 2));
     if (mounted) {
-      final auth = Provider.of<AuthProvider>(context, listen: false);
+      final auth = getIt<AuthProvider>();
       if (auth.isLoggedIn) {
         Navigator.pushReplacementNamed(context, '/home');
       } else {
@@ -1037,7 +1046,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
   void _login() async {
     if (_formKey.currentState!.validate()) {
-      final auth = Provider.of<AuthProvider>(context, listen: false);
+      final auth = getIt<AuthProvider>();
       bool success = await auth.login(_usernameController.text, _passwordController.text);
       if (success && mounted) {
         Navigator.pushReplacementNamed(context, '/home');
@@ -1051,7 +1060,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
+    final auth = getIt<AuthProvider>();
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -1219,7 +1228,7 @@ class _RegisterPageState extends State<RegisterPage> with SingleTickerProviderSt
 
   void _register() async {
     if (_formKey.currentState!.validate()) {
-      final auth = Provider.of<AuthProvider>(context, listen: false);
+      final auth = getIt<AuthProvider>();
       Map<String, dynamic> data = {
         'username': _usernameController.text,
         'password': _passwordController.text,
@@ -1241,7 +1250,7 @@ class _RegisterPageState extends State<RegisterPage> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
+    final auth = getIt<AuthProvider>();
     return Scaffold(
       appBar: AppBar(title: const Text('Register')),
       body: Container(
@@ -1404,7 +1413,6 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  int _selectedIndex = 0;
 
   @override
   void initState() {
@@ -1414,7 +1422,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _loadData() async {
-    final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+    final chatProvider = getIt<ChatProvider>();
     await chatProvider.loadChats();
   }
 
@@ -1426,8 +1434,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
-    final chatProvider = Provider.of<ChatProvider>(context);
+    final auth = getIt<AuthProvider>();
+    final chatProvider = getIt<ChatProvider>();
     return Scaffold(
       appBar: AppBar(
         title: const Text('Messenger'),
@@ -1517,7 +1525,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               if (!snapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
-              final users = snapshot.data!.where((u) => u.id != Provider.of<AuthProvider>(context).currentUser?.id).toList();
+              final users = snapshot.data!.where((u) => u.id != getIt<AuthProvider>().currentUser?.id).toList();
               return ListView.builder(
                 shrinkWrap: true,
                 itemCount: users.length,
@@ -1532,7 +1540,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     subtitle: Text(user.username),
                     onTap: () async {
                       Navigator.pop(ctx);
-                      final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+                      final chatProvider = getIt<ChatProvider>();
                       final chat = await chatProvider.createPrivateChat(user.id);
                       if (chat != null && mounted) {
                         Navigator.pushNamed(context, '/chat', arguments: chat);
@@ -1582,31 +1590,33 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     if (!snapshot.hasData) {
                       return const Center(child: CircularProgressIndicator());
                     }
-                    final users = snapshot.data!.where((u) => u.id != Provider.of<AuthProvider>(context).currentUser?.id).toList();
-                    return ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: users.length,
-                      itemBuilder: (ctx, i) {
-                        final user = users[i];
-                        final isSelected = selectedUsers.contains(user);
-                        return CheckboxListTile(
-                          value: isSelected,
-                          onChanged: (val) {
-                            setState(() {
-                              if (val == true) {
-                                selectedUsers.add(user);
-                              } else {
-                                selectedUsers.remove(user);
-                              }
-                            });
-                          },
-                          title: Text(user.displayName),
-                          secondary: CircleAvatar(
-                            backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
-                            child: user.avatar == null ? Text(user.username[0].toUpperCase()) : null,
-                          ),
-                        );
-                      },
+                    final users = snapshot.data!.where((u) => u.id != getIt<AuthProvider>().currentUser?.id).toList();
+                    return StatefulBuilder(
+                      builder: (ctx, setState) => ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: users.length,
+                        itemBuilder: (ctx, i) {
+                          final user = users[i];
+                          final isSelected = selectedUsers.contains(user);
+                          return CheckboxListTile(
+                            value: isSelected,
+                            onChanged: (val) {
+                              setState(() {
+                                if (val == true) {
+                                  selectedUsers.add(user);
+                                } else {
+                                  selectedUsers.remove(user);
+                                }
+                              });
+                            },
+                            title: Text(user.displayName),
+                            secondary: CircleAvatar(
+                              backgroundImage: user.avatar != null ? CachedNetworkImageProvider(user.avatar!) : null,
+                              child: user.avatar == null ? Text(user.username[0].toUpperCase()) : null,
+                            ),
+                          );
+                        },
+                      ),
                     );
                   },
                 ),
@@ -1623,7 +1633,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             onPressed: () async {
               if (titleController.text.isNotEmpty && selectedUsers.isNotEmpty) {
                 Navigator.pop(ctx);
-                final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+                final chatProvider = getIt<ChatProvider>();
                 final chat = await chatProvider.createGroup(
                   titleController.text,
                   selectedUsers.map((u) => u.id).toList(),
@@ -1647,7 +1657,7 @@ class ChatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
+    final auth = getIt<AuthProvider>();
     return InkWell(
       onTap: () {
         Navigator.pushNamed(context, '/chat', arguments: chat);
@@ -1738,7 +1748,7 @@ class ChatTile extends StatelessWidget {
 class ProfileTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
+    final auth = getIt<AuthProvider>();
     final user = auth.currentUser;
     if (user == null) return const Center(child: CircularProgressIndicator());
     return ListView(
@@ -1830,7 +1840,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     chat = ModalRoute.of(context)!.settings.arguments as Chat;
-    Provider.of<MessageProvider>(context, listen: false).loadMessages(chat.id);
+    getIt<MessageProvider>().loadMessages(chat.id);
     _focusNode.addListener(_onFocusChange);
     _fabAnimationController = AnimationController(
       vsync: this,
@@ -1870,7 +1880,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   void _sendMessage() async {
     if (_messageController.text.trim().isEmpty && _selectedMedia == null) return;
     setState(() => _isSending = true);
-    final msgProvider = Provider.of<MessageProvider>(context, listen: false);
+    final msgProvider = getIt<MessageProvider>();
     await msgProvider.sendMessage(
       chat.id,
       _messageController.text,
@@ -1900,13 +1910,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   void _handleTyping(String text) {
     if (!_isTyping && text.isNotEmpty) {
       _isTyping = true;
-      Provider.of<ChatProvider>(context, listen: false).sendTyping(chat.id, true);
+      getIt<ChatProvider>().sendTyping(chat.id, true);
     }
     _typingTimer?.cancel();
     _typingTimer = Timer(const Duration(seconds: 2), () {
       if (_isTyping) {
         _isTyping = false;
-        Provider.of<ChatProvider>(context, listen: false).sendTyping(chat.id, false);
+        getIt<ChatProvider>().sendTyping(chat.id, false);
       }
     });
   }
@@ -1982,10 +1992,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
-    final msgProvider = Provider.of<MessageProvider>(context);
+    final auth = getIt<AuthProvider>();
+    final msgProvider = getIt<MessageProvider>();
     final messages = msgProvider.getMessages(chat.id) ?? [];
-    final chatProvider = Provider.of<ChatProvider>(context);
+    final chatProvider = getIt<ChatProvider>();
     final typingUsers = chat.participants
         .where((u) => u.id != auth.currentUser?.id && chatProvider.isTyping(chat.id, u.id))
         .map((u) => u.displayName)
@@ -2212,7 +2222,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     showDialog(
       context: context,
       builder: (ctx) {
-        final chatProvider = Provider.of<ChatProvider>(context, listen: false);
+        final chatProvider = getIt<ChatProvider>();
         return AlertDialog(
           title: const Text('Forward to'),
           content: SizedBox(
@@ -2230,8 +2240,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                   title: Text(chat.displayTitle),
                   onTap: () async {
                     Navigator.pop(ctx);
-                    await Provider.of<MessageProvider>(context, listen: false)
-                        .forwardMessage(msg.id, [chat.id]);
+                    await getIt<MessageProvider>().forwardMessage(msg.id, [chat.id]);
                   },
                 );
               },
@@ -2308,7 +2317,7 @@ class _MessageBubbleState extends State<MessageBubble> with TickerProviderStateM
   Widget build(BuildContext context) {
     final reactions = widget.message.reactions;
     final myReaction = reactions.firstWhere(
-      (r) => r.userId == Provider.of<AuthProvider>(context).currentUser?.id,
+      (r) => r.userId == getIt<AuthProvider>().currentUser?.id,
       orElse: () => Reaction(userId: 0, emoji: '', createdAt: DateTime.now()),
     );
     final hasMyReaction = myReaction.emoji.isNotEmpty;
@@ -2442,7 +2451,10 @@ class _MessageBubbleState extends State<MessageBubble> with TickerProviderStateM
                                   if (widget.isMe)
                                     const PopupMenuItem(value: 'delete', child: Text('Delete')),
                                   const PopupMenuItem(value: 'forward', child: Text('Forward')),
-                                  const PopupMenuItem(value: 'pin', child: Text(widget.message.pinned ? 'Unpin' : 'Pin')),
+                                  PopupMenuItem(
+                                    value: 'pin',
+                                    child: Text(widget.message.pinned ? 'Unpin' : 'Pin'),
+                                  ),
                                 ],
                                 onSelected: (value) {
                                   if (value == 'reply') widget.onReply();
@@ -2537,7 +2549,7 @@ class _ChatInfoPageState extends State<ChatInfoPage> {
 
   @override
   Widget build(BuildContext context) {
-    final auth = Provider.of<AuthProvider>(context);
+    final auth = getIt<AuthProvider>();
     final isAdmin = chat.createdBy == auth.currentUser?.id ||
         chat.participants.any((p) => p.id == auth.currentUser?.id && false); // need role info, but we don't have role in model. We'll skip.
 
@@ -2606,8 +2618,7 @@ class _ChatInfoPageState extends State<ChatInfoPage> {
                         padding: const EdgeInsets.only(top: 10),
                         child: ElevatedButton(
                           onPressed: () {
-                            Provider.of<ChatProvider>(context, listen: false)
-                                .updateChatInfo(chat.id, title: _titleController.text, description: _descController.text);
+                            getIt<ChatProvider>().updateChatInfo(chat.id, title: _titleController.text, description: _descController.text);
                           },
                           child: const Text('Update'),
                         ),
@@ -2655,7 +2666,7 @@ class _ChatInfoPageState extends State<ChatInfoPage> {
                 leading: const Icon(Icons.archive),
                 title: const Text('Archive Chat'),
                 onTap: () {
-                  Provider.of<ChatProvider>(context, listen: false).archiveChatManually(chat.id);
+                  getIt<ChatProvider>().archiveChatManually(chat.id);
                   Navigator.pop(context);
                 },
               ),
@@ -2687,7 +2698,7 @@ class _ChatInfoPageState extends State<ChatInfoPage> {
                 title: Text(user.displayName),
                 onTap: () {
                   Navigator.pop(ctx);
-                  Provider.of<ChatProvider>(context, listen: false).addParticipant(chat.id, user.id);
+                  getIt<ChatProvider>().addParticipant(chat.id, user.id);
                 },
               );
             },
@@ -2757,7 +2768,7 @@ class _SearchPageState extends State<SearchPage> {
                 ),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
               ),
-              onSubmitted: (_) => _search,
+              onSubmitted: (_) => _search(),
             ),
             const SizedBox(height: 20),
             if (_isSearching)
@@ -2808,7 +2819,7 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   void initState() {
     super.initState();
-    final user = Provider.of<AuthProvider>(context, listen: false).currentUser;
+    final user = getIt<AuthProvider>().currentUser;
     if (user != null) {
       _firstNameController.text = user.firstName ?? '';
       _lastNameController.text = user.lastName ?? '';
@@ -2820,7 +2831,7 @@ class _ProfilePageState extends State<ProfilePage> {
   Future<void> _save() async {
     if (_formKey.currentState!.validate()) {
       setState(() => _isSaving = true);
-      final auth = Provider.of<AuthProvider>(context, listen: false);
+      final auth = getIt<AuthProvider>();
       final userId = auth.currentUser!.id;
       try {
         await ApiService().put('/users/$userId', data: {
@@ -2829,8 +2840,7 @@ class _ProfilePageState extends State<ProfilePage> {
           'bio': _bioController.text,
           'phone': _phoneController.text,
         });
-        // Refresh user
-        await auth.loadToken(); // This will reload token and user? Actually we need to fetch user again. We'll just update local.
+        // Refresh user (for simplicity, we just pop)
         setState(() => _isSaving = false);
         Navigator.pop(context);
       } catch (e) {
