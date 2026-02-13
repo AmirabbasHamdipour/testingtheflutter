@@ -308,11 +308,51 @@ class ApiService {
   factory ApiService() => _instance;
   ApiService._internal();
 
-  late Dio _dio;
+  Dio? _dio; // changed from late to nullable
   String? _token;
+
+  void _ensureDio() {
+    if (_dio == null) {
+      _dio = Dio(BaseOptions(
+        baseUrl: apiUrl,
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(seconds: 30),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ));
+      (_dio!.httpClientAdapter as IOHttpClientAdapter).onHttpClientCreate =
+          (client) {
+        client.badCertificateCallback =
+            (X509Certificate cert, String host, int port) => true;
+        return client;
+      };
+      _dio!.interceptors.add(InterceptorsWrapper(
+        onRequest: (options, handler) {
+          if (_token != null) {
+            options.headers['Authorization'] = 'Bearer $_token';
+          }
+          return handler.next(options);
+        },
+        onError: (DioError e, handler) {
+          if (e.response?.statusCode == 401) {
+            getIt<AuthProvider>().logout();
+          }
+          return handler.next(e);
+        },
+      ));
+      _dio!.interceptors.add(LogInterceptor(
+        requestBody: true,
+        responseBody: true,
+        error: true,
+      ));
+    }
+  }
 
   void init({String? token}) {
     _token = token;
+    // Force re-creation of Dio with new token
     _dio = Dio(BaseOptions(
       baseUrl: apiUrl,
       connectTimeout: const Duration(seconds: 30),
@@ -322,13 +362,13 @@ class ApiService {
         'Accept': 'application/json',
       },
     ));
-    (_dio.httpClientAdapter as IOHttpClientAdapter).onHttpClientCreate =
+    (_dio!.httpClientAdapter as IOHttpClientAdapter).onHttpClientCreate =
         (client) {
       client.badCertificateCallback =
           (X509Certificate cert, String host, int port) => true;
       return client;
     };
-    _dio.interceptors.add(InterceptorsWrapper(
+    _dio!.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
         if (_token != null) {
           options.headers['Authorization'] = 'Bearer $_token';
@@ -342,8 +382,7 @@ class ApiService {
         return handler.next(e);
       },
     ));
-    // افزودن LogInterceptor برای دیباگ (اختیاری)
-    _dio.interceptors.add(LogInterceptor(
+    _dio!.interceptors.add(LogInterceptor(
       requestBody: true,
       responseBody: true,
       error: true,
@@ -351,32 +390,36 @@ class ApiService {
   }
 
   Future<Response> post(String path, {dynamic data}) async {
+    _ensureDio();
     try {
-      return await _dio.post(path, data: data);
+      return await _dio!.post(path, data: data);
     } catch (e) {
       rethrow;
     }
   }
 
   Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) async {
+    _ensureDio();
     try {
-      return await _dio.get(path, queryParameters: queryParameters);
+      return await _dio!.get(path, queryParameters: queryParameters);
     } catch (e) {
       rethrow;
     }
   }
 
   Future<Response> put(String path, {dynamic data}) async {
+    _ensureDio();
     try {
-      return await _dio.put(path, data: data);
+      return await _dio!.put(path, data: data);
     } catch (e) {
       rethrow;
     }
   }
 
   Future<Response> delete(String path) async {
+    _ensureDio();
     try {
-      return await _dio.delete(path);
+      return await _dio!.delete(path);
     } catch (e) {
       rethrow;
     }
@@ -384,12 +427,13 @@ class ApiService {
 
   Future<Response> uploadFile(String path, String field, File file,
       {Map<String, dynamic>? data, String? method = 'POST'}) async {
+    _ensureDio();
     String fileName = file.path.split('/').last;
     FormData formData = FormData.fromMap({
       ...?data,
       field: await MultipartFile.fromFile(file.path, filename: fileName),
     });
-    return await _dio.post(path, data: formData);
+    return await _dio!.post(path, data: formData);
   }
 }
 
