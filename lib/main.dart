@@ -101,8 +101,8 @@ class User {
   final String? lastName;
   final String? bio;
   final String? avatar;
-  bool isOnline; // now mutable
-  DateTime? lastSeen; // now mutable
+  bool isOnline;
+  DateTime? lastSeen;
   final String? phone;
 
   User({
@@ -154,7 +154,7 @@ class User {
 
 class Chat {
   final int id;
-  final String type; // 'private', 'group', 'channel'
+  final String type;
   String? title;
   String? description;
   String? avatar;
@@ -163,7 +163,7 @@ class Chat {
   final List<User> participants;
   Message? lastMessage;
   bool isArchived;
-  User? otherUser; // for private chat
+  User? otherUser;
 
   Chat({
     required this.id,
@@ -337,11 +337,16 @@ class ApiService {
       },
       onError: (DioError e, handler) {
         if (e.response?.statusCode == 401) {
-          // Token expired, logout
           getIt<AuthProvider>().logout();
         }
         return handler.next(e);
       },
+    ));
+    // افزودن LogInterceptor برای دیباگ (اختیاری)
+    _dio.interceptors.add(LogInterceptor(
+      requestBody: true,
+      responseBody: true,
+      error: true,
     ));
   }
 
@@ -477,17 +482,34 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
-  Future<bool> register(Map<String, dynamic> userData) async {
+  Future<Map<String, dynamic>?> register(Map<String, dynamic> userData) async {
     _isLoading = true;
     notifyListeners();
     try {
       final response = await _api.post('/register', data: userData);
       // After register, automatically login
-      return await login(userData['username'], userData['password']);
+      bool loginSuccess = await login(userData['username'], userData['password']);
+      if (loginSuccess) {
+        return {'success': true};
+      } else {
+        return {'success': false, 'error': 'ورود پس از ثبت‌نام ناموفق بود'};
+      }
     } catch (e) {
       _isLoading = false;
       notifyListeners();
-      return false;
+      if (e is DioError) {
+        if (e.response != null) {
+          String serverError = e.response?.data['error'] ?? 'خطای ناشناخته سرور';
+          return {
+            'success': false,
+            'error': serverError,
+            'statusCode': e.response?.statusCode
+          };
+        } else {
+          return {'success': false, 'error': 'خطای شبکه: ${e.message}'};
+        }
+      }
+      return {'success': false, 'error': e.toString()};
     }
   }
 
@@ -513,9 +535,7 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _fetchCurrentUser() async {
-    // If needed, implement fetch user by id. For now, skip.
-  }
+  Future<void> _fetchCurrentUser() async {}
 
   Future<void> _saveToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
@@ -573,7 +593,7 @@ class AuthProvider extends ChangeNotifier {
 
 class ChatProvider extends ChangeNotifier {
   List<Chat> _chats = [];
-  Map<String, bool> _typingUsers = {}; // key: "chatId-userId"
+  Map<String, bool> _typingUsers = {};
   final ApiService _api = ApiService();
 
   List<Chat> get chats => _chats;
@@ -657,7 +677,6 @@ class ChatProvider extends ChangeNotifier {
         'participant_ids': [userId],
       });
       final chat = Chat.fromJson(response.data, currentUserId: getIt<AuthProvider>().currentUser?.id);
-      // Add to list if not already
       if (!_chats.any((c) => c.id == chat.id)) {
         _chats.insert(0, chat);
         notifyListeners();
@@ -690,7 +709,6 @@ class ChatProvider extends ChangeNotifier {
       if (title != null) data['title'] = title;
       if (description != null) data['description'] = description;
       await _api.put('/chats/$chatId', data: data);
-      // Update will come via socket
     } catch (e) {}
   }
 
@@ -714,7 +732,7 @@ class ChatProvider extends ChangeNotifier {
 }
 
 class MessageProvider extends ChangeNotifier {
-  final Map<int, List<Message>> _messages = {}; // chatId -> messages
+  final Map<int, List<Message>> _messages = {};
   final Map<int, bool> _loading = {};
   final ApiService _api = ApiService();
 
@@ -738,7 +756,6 @@ class MessageProvider extends ChangeNotifier {
       } else {
         _messages[chatId]?.addAll(newMessages);
       }
-      // sort by createdAt descending
       _messages[chatId]?.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _loading[chatId] = false;
       notifyListeners();
@@ -888,14 +905,12 @@ class MessageProvider extends ChangeNotifier {
   Future<void> editMessage(int messageId, String newText) async {
     try {
       await _api.put('/messages/$messageId', data: {'text': newText});
-      // update will come via socket
     } catch (e) {}
   }
 
   Future<void> deleteMessageApi(int messageId) async {
     try {
       await _api.delete('/messages/$messageId');
-      // delete will come via socket
     } catch (e) {}
   }
 
@@ -1237,13 +1252,27 @@ class _RegisterPageState extends State<RegisterPage> with SingleTickerProviderSt
         'phone': _phoneController.text,
         'bio': _bioController.text,
       };
-      bool success = await auth.register(data);
-      if (success && mounted) {
-        Navigator.pushReplacementNamed(context, '/home');
+      final result = await auth.register(data);
+      if (result != null && result['success'] == true) {
+        if (mounted) Navigator.pushReplacementNamed(context, '/home');
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Registration failed')),
-        );
+        String errorMsg = result?['error'] ?? 'ثبت‌نام ناموفق بود';
+        if (result?['statusCode'] != null) {
+          errorMsg += ' (کد خطا: ${result['statusCode']})';
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(errorMsg),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 5),
+              action: SnackBarAction(
+                label: 'باشه',
+                onPressed: () {},
+              ),
+            ),
+          );
+        }
       }
     }
   }
@@ -2840,7 +2869,6 @@ class _ProfilePageState extends State<ProfilePage> {
           'bio': _bioController.text,
           'phone': _phoneController.text,
         });
-        // Refresh user (for simplicity, we just pop)
         setState(() => _isSaving = false);
         Navigator.pop(context);
       } catch (e) {
