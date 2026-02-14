@@ -360,11 +360,14 @@ class MessagingClient {
     } else {
       final client = http.Client();
       try {
-        response = await client.send(
-          http.Request(method, url)
-            ..headers.addAll(requestHeaders)
-            ..body = body != null ? jsonEncode(body) : null,
-        ).then(http.Response.fromStream);
+        // ایجاد درخواست و اختصاص body فقط در صورت غیر null بودن
+        final httpRequest = http.Request(method, url)
+          ..headers.addAll(requestHeaders);
+        if (body != null) {
+          httpRequest.body = jsonEncode(body);
+        }
+        final streamedResponse = await client.send(httpRequest);
+        response = await http.Response.fromStream(streamedResponse);
       } finally {
         client.close();
       }
@@ -724,7 +727,7 @@ class MessagingClient {
           .setTransports(['websocket']) // force websocket
           .setExtraHeaders({'Authorization': 'Bearer $_token'}) // not used by server? server uses query param
           .setQuery({'token': _token!}) // token as query parameter
-          .enableAutoReconnect() // auto reconnect
+          .enableReconnection() // auto reconnect (اصلاح شده)
           .build(),
     );
 
