@@ -37,7 +37,7 @@ dependencies:
   socket_io_client: ^2.0.0
   provider: ^6.0.0
   cached_network_image: ^3.2.0
-  intl: ^0.18.0
+  intl: ^0.20.2       # <-- نسخه اصلاح شده
   path_provider: ^2.0.11
   image: ^4.0.0
   http_parser: ^4.0.0
@@ -45,7 +45,6 @@ dependencies:
   connectivity_plus: ^4.0.0
   flutter_localizations:
     sdk: flutter
-  
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
