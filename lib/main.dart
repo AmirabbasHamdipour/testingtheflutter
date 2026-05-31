@@ -11,7 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:hive/hive.dart';
 import 'package:path_provider/path_provider.dart' as path_provider;
-import 'package:html/parser.dart' as html_parser;   // اضافه‌شده برای اسکرپ
+import 'package:html/parser.dart' as html_parser;
 
 // -------------------- Models --------------------
 part 'main.g.dart'; // برای Hive
@@ -21,17 +21,17 @@ class GoldTransaction extends HiveObject {
   @HiveField(0)
   String id;
   @HiveField(1)
-  String type; // gold_18, gold_24, gold_ons, gold_mazneh (برای طلا) و برای سکه: coin_old, coin_new, coin_half, coin_quarter, coin_1g
+  String type;
   @HiveField(2)
   DateTime purchaseDate;
   @HiveField(3)
-  double purchasePricePerUnit; // فی خرید
+  double purchasePricePerUnit;
   @HiveField(4)
-  double quantity; // وزن بر حسب گرم (برای طلا) یا تعداد (برای سکه؟ اما اینجا double است)
+  double quantity;
   @HiveField(5)
   String description;
   @HiveField(6)
-  bool isGold; // true for gold, false for coin
+  bool isGold;
 
   GoldTransaction({
     required this.id,
@@ -49,13 +49,13 @@ class CoinTransaction extends HiveObject {
   @HiveField(0)
   String id;
   @HiveField(1)
-  String coinType; // coin_old, coin_new, coin_half, coin_quarter, coin_1g
+  String coinType;
   @HiveField(2)
   DateTime purchaseDate;
   @HiveField(3)
-  double purchasePricePerUnit; // فی هر سکه
+  double purchasePricePerUnit;
   @HiveField(4)
-  int count; // تعداد
+  int count;
   @HiveField(5)
   String description;
 
@@ -119,7 +119,6 @@ class Change {
 class ApiService {
   static const String _pageUrl = 'https://www.estjt.ir/price/';
 
-  /// نگاشت نام‌های فارسی به کلیدهای برنامه
   static const Map<String, String> _nameToKey = {
     'انس طلا': 'gold_ons',
     'مظنه تهران': 'gold_mazneh',
@@ -132,7 +131,6 @@ class ApiService {
     'سکه یک گرمی': 'coin_1g',
   };
 
-  /// تبدیل ارقام فارسی/عربی به انگلیسی
   static String _persianToEnglish(String s) {
     const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
     const englishDigits = '0123456789';
@@ -149,7 +147,6 @@ class ApiService {
     return result.toString();
   }
 
-  /// تبدیل متن قیمت به double? (null در صورت '—')
   static double? _parsePrice(String text) {
     if (text.trim() == '—') return null;
     final cleaned = _persianToEnglish(text).replaceAll(RegExp(r'[^\d.]'), '');
@@ -157,7 +154,6 @@ class ApiService {
     return double.tryParse(cleaned);
   }
 
-  /// استخراج مقدار و درصد تغییر از متنی مانند "۴۷۸.۷۹۶ (۲.۵۱)"
   static Map<String, double?>? _parseChange(String changeText) {
     final text = _persianToEnglish(changeText);
     final match = RegExp(r'([\d.]+)\s*\(([\d.]+)\)').firstMatch(text);
@@ -169,7 +165,6 @@ class ApiService {
     return null;
   }
 
-  /// دریافت و پارس کل قیمت‌ها از وب‌سایت اتحادیه
   static Future<Map<String, PriceResponse>> fetchAllPrices() async {
     try {
       final response = await http.get(
@@ -200,13 +195,11 @@ class ApiService {
         final key = _nameToKey[name];
         if (key == null) continue;
 
-        // قیمت‌های اصلی
         var current = _parsePrice(cells[1].text.trim());
         var high = _parsePrice(cells[2].text.trim());
         var low = _parsePrice(cells[3].text.trim());
         var yesterdayAvg = _parsePrice(cells[4].text.trim());
 
-        // اطلاعات تغییر
         String? direction;
         double? changeVal;
         double? changePercent;
@@ -224,7 +217,6 @@ class ApiService {
           }
         }
 
-        // تبدیل تومان به ریال (به جز انس طلا)
         if (key != 'gold_ons') {
           current = current != null ? current * 10 : null;
           high = high != null ? high * 10 : null;
@@ -254,7 +246,7 @@ class ApiService {
   }
 }
 
-// -------------------- Providers (بدون تغییر) --------------------
+// -------------------- Providers --------------------
 class PriceProvider extends ChangeNotifier {
   Map<String, PriceResponse> _prices = {};
   Map<String, PriceResponse> _lastSavedPrices = {};
@@ -350,8 +342,8 @@ class PriceProvider extends ChangeNotifier {
 }
 
 class SettingsProvider extends ChangeNotifier {
-  double _bankInterestRate = 26.0; // درصد
-  int _autoUpdateInterval = 300; // ثانیه
+  double _bankInterestRate = 26.0;
+  int _autoUpdateInterval = 300;
 
   double get bankInterestRate => _bankInterestRate;
   int get autoUpdateInterval => _autoUpdateInterval;
@@ -376,6 +368,37 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> setAutoUpdateInterval(int seconds) async {
     _autoUpdateInterval = seconds;
     await _prefs.setInt('autoUpdateInterval', seconds);
+    notifyListeners();
+  }
+}
+
+class BasePriceProvider extends ChangeNotifier {
+  Map<String, double> _basePrices = {};
+  final SharedPreferences _prefs;
+
+  BasePriceProvider(this._prefs) {
+    _loadBasePrices();
+  }
+
+  Map<String, double> get basePrices => UnmodifiableMapView(_basePrices);
+
+  void _loadBasePrices() {
+    final jsonStr = _prefs.getString('basePrices');
+    if (jsonStr != null) {
+      final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+      _basePrices = map.map((k, v) => MapEntry(k, (v as num).toDouble()));
+    } else {
+      _basePrices = {
+        'gold_18': 0, 'gold_24': 0, 'gold_ons': 0, 'gold_mazneh': 0,
+        'coin_old': 0, 'coin_new': 0, 'coin_half': 0, 'coin_quarter': 0, 'coin_1g': 0,
+      };
+    }
+    notifyListeners();
+  }
+
+  Future<void> setBasePrice(String key, double value) async {
+    _basePrices[key] = value;
+    await _prefs.setString('basePrices', jsonEncode(_basePrices));
     notifyListeners();
   }
 }
@@ -616,47 +639,93 @@ class HomeScreen extends StatelessWidget {
     final priceProvider = Provider.of<PriceProvider>(context);
     final dataProvider = Provider.of<DataProvider>(context);
     final settings = Provider.of<SettingsProvider>(context);
+    final basePriceProvider = Provider.of<BasePriceProvider>(context);
+    final basePrices = basePriceProvider.basePrices;
 
+    // تاریخ‌های مهم
+    final DateTime startOf1405 = DateTime(2026, 3, 21); // ۱ فروردین ۱۴۰۵
+    final DateTime endOf1404 = DateTime(2026, 3, 20);   // ۲۹ اسفند ۱۴۰۴
+
+    // محاسبه کل ارزش فعلی طلا و سکه
     double totalGoldValue = 0;
-    double totalGoldPaid = 0;
-    double totalGoldProfit = 0;
+    double totalCoinValue = 0;
     for (var g in dataProvider.goldList) {
       final currentPrice = priceProvider.prices[g.type]?.currentPrice ?? 0;
       totalGoldValue += currentPrice * g.quantity;
-      totalGoldPaid += g.purchasePricePerUnit * g.quantity;
-      int days = Calculator.daysBetween(g.purchaseDate, DateTime.now());
-      double profit = Calculator.calculateProfit(
-        currentPrice: currentPrice,
-        purchasePrice: g.purchasePricePerUnit,
-        quantity: g.quantity,
-        paidAmount: g.purchasePricePerUnit * g.quantity,
-        interestRate: settings.bankInterestRate,
-        days: days,
-      );
-      totalGoldProfit += profit;
     }
-
-    double totalCoinValue = 0;
-    double totalCoinPaid = 0;
-    double totalCoinProfit = 0;
     for (var c in dataProvider.coinList) {
       final currentPrice = priceProvider.prices[c.coinType]?.currentPrice ?? 0;
       totalCoinValue += currentPrice * c.count;
-      totalCoinPaid += c.purchasePricePerUnit * c.count;
-      int days = Calculator.daysBetween(c.purchaseDate, DateTime.now());
+    }
+    final totalAssets = totalGoldValue + totalCoinValue;
+
+    // محاسبه سود/زیان از ابتدای ۱۴۰۵ (بر اساس قیمت‌های ۱/۱/۱۴۰۵)
+    double totalProfit1405 = 0;
+    for (var g in dataProvider.goldList) {
+      final basePrice = basePrices[g.type] ?? 0;
+      final currentPrice = priceProvider.prices[g.type]?.currentPrice ?? 0;
+      final baseValue = basePrice * g.quantity;
+      final days = Calculator.daysBetween(startOf1405, DateTime.now());
       double profit = Calculator.calculateProfit(
         currentPrice: currentPrice,
-        purchasePrice: c.purchasePricePerUnit,
-        quantity: c.count.toDouble(),
-        paidAmount: c.purchasePricePerUnit * c.count,
+        purchasePrice: basePrice,
+        quantity: g.quantity,
+        paidAmount: baseValue,
         interestRate: settings.bankInterestRate,
         days: days,
       );
-      totalCoinProfit += profit;
+      totalProfit1405 += profit;
+    }
+    for (var c in dataProvider.coinList) {
+      final basePrice = basePrices[c.coinType] ?? 0;
+      final currentPrice = priceProvider.prices[c.coinType]?.currentPrice ?? 0;
+      final baseValue = basePrice * c.count;
+      final days = Calculator.daysBetween(startOf1405, DateTime.now());
+      double profit = Calculator.calculateProfit(
+        currentPrice: currentPrice,
+        purchasePrice: basePrice,
+        quantity: c.count.toDouble(),
+        paidAmount: baseValue,
+        interestRate: settings.bankInterestRate,
+        days: days,
+      );
+      totalProfit1405 += profit;
     }
 
-    final totalAssets = totalGoldValue + totalCoinValue;
-    final totalProfit = totalGoldProfit + totalCoinProfit;
+    // محاسبه سود محقق شده ۱۴۰۴ (تا پایان سال ۱۴۰۴ با قیمت‌های ۱/۱/۱۴۰۵ به عنوان قیمت پایان سال)
+    double totalRealizedProfit1404 = 0;
+    for (var g in dataProvider.goldList) {
+      if (g.purchaseDate.isAfter(endOf1404)) continue;
+      final endPrice = basePrices[g.type] ?? 0;
+      final paidAmount = g.purchasePricePerUnit * g.quantity;
+      final days = Calculator.daysBetween(g.purchaseDate, endOf1404);
+      double profit = Calculator.calculateProfit(
+        currentPrice: endPrice,
+        purchasePrice: g.purchasePricePerUnit,
+        quantity: g.quantity,
+        paidAmount: paidAmount,
+        interestRate: settings.bankInterestRate,
+        days: days,
+      );
+      totalRealizedProfit1404 += profit;
+    }
+    for (var c in dataProvider.coinList) {
+      if (c.purchaseDate.isAfter(endOf1404)) continue;
+      final endPrice = basePrices[c.coinType] ?? 0;
+      final paidAmount = c.purchasePricePerUnit * c.count;
+      final days = Calculator.daysBetween(c.purchaseDate, endOf1404);
+      double profit = Calculator.calculateProfit(
+        currentPrice: endPrice,
+        purchasePrice: c.purchasePricePerUnit,
+        quantity: c.count.toDouble(),
+        paidAmount: paidAmount,
+        interestRate: settings.bankInterestRate,
+        days: days,
+      );
+      totalRealizedProfit1404 += profit;
+    }
+
+    final numberFormat = NumberFormat('#,###');
 
     return Scaffold(
       appBar: AppBar(title: Text('خلاصه دارایی'), centerTitle: true),
@@ -679,15 +748,15 @@ class HomeScreen extends StatelessWidget {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        _buildSummaryItem(context, 'کل دارایی', NumberFormat('#,###').format(totalAssets), Colors.green),
+                        _buildSummaryItem(context, 'کل دارایی', numberFormat.format(totalAssets), Colors.green),
                       ],
                     ),
                     SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        _buildSummaryItem(context, 'طلای آب شده', NumberFormat('#,###').format(totalGoldValue), Colors.blue),
-                        _buildSummaryItem(context, 'سکه', NumberFormat('#,###').format(totalCoinValue), Colors.blue),
+                        _buildSummaryItem(context, 'طلای آب شده', numberFormat.format(totalGoldValue), Colors.blue),
+                        _buildSummaryItem(context, 'سکه', numberFormat.format(totalCoinValue), Colors.blue),
                       ],
                     ),
                   ],
@@ -695,29 +764,53 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
             SizedBox(height: 16),
+            // سود/زیان از ابتدای ۱۴۰۵
             Card(
               elevation: 4,
               child: Padding(
                 padding: EdgeInsets.all(16),
                 child: Column(
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text('سود/زیان کل: ', style: TextStyle(fontWeight: FontWeight.bold)),
-                        Text(
-                          NumberFormat('#,###').format(totalProfit),
-                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: totalProfit >= 0 ? Colors.green : Colors.red),
-                        ),
-                      ],
+                    Text('سود/زیان از ابتدای ۱۴۰۵', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    SizedBox(height: 8),
+                    Text(
+                      numberFormat.format(totalProfit1405),
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: totalProfit1405 >= 0 ? Colors.green : Colors.red,
+                      ),
                     ),
-                    Divider(),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildSummaryItem(context, 'سود طلا', NumberFormat('#,###').format(totalGoldProfit), totalGoldProfit >= 0 ? Colors.green : Colors.red),
-                        _buildSummaryItem(context, 'سود سکه', NumberFormat('#,###').format(totalCoinProfit), totalCoinProfit >= 0 ? Colors.green : Colors.red),
-                      ],
+                    if (basePrices.values.every((p) => p == 0))
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8.0),
+                        child: Text(
+                          'قیمت‌های پایه (۱/۱/۱۴۰۵) تنظیم نشده‌اند. لطفاً از تنظیمات وارد کنید.',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            SizedBox(height: 12),
+            // سود محقق شده ۱۴۰۴
+            Card(
+              elevation: 4,
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Text('سود محقق شده پایان ۱۴۰۴', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    SizedBox(height: 8),
+                    Text(
+                      numberFormat.format(totalRealizedProfit1404),
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: totalRealizedProfit1404 >= 0 ? Colors.green : Colors.red,
+                      ),
                     ),
                   ],
                 ),
@@ -740,7 +833,7 @@ class HomeScreen extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Text(_getPersianName(e.key), style: TextStyle(fontWeight: FontWeight.bold)),
-                        Text(NumberFormat('#,###').format(price)),
+                        Text(numberFormat.format(price)),
                       ],
                     ),
                   ),
@@ -1014,7 +1107,7 @@ class CoinListScreen extends StatelessWidget {
     int totalCoinCount = 0;
     int rubCount = 0;
     int nimCount = 0;
-    int tamamCount = 0; // coin_new + coin_old
+    int tamamCount = 0;
     double totalPaid = 0;
 
     for (var c in dataProvider.coinList) {
@@ -1277,17 +1370,15 @@ class ChartsScreen extends StatelessWidget {
     final goldList = dataProvider.goldList;
     final coinList = dataProvider.coinList;
 
-    // محاسبه ارزش طلا
     double totalGoldValue = 0;
     for (var g in goldList) {
       totalGoldValue += (priceProvider.prices[g.type]?.currentPrice ?? 0) * g.quantity;
     }
 
-    // محاسبه ارزش سکه به تفکیک
-    double totalCoinRob = 0; // ربع
-    double totalCoinNim = 0; // نیم
-    double totalCoinTamam = 0; // تمام (جدید و قدیم)
-    double totalCoin1g = 0; // یک گرمی
+    double totalCoinRob = 0;
+    double totalCoinNim = 0;
+    double totalCoinTamam = 0;
+    double totalCoin1g = 0;
     for (var c in coinList) {
       final currentPrice = priceProvider.prices[c.coinType]?.currentPrice ?? 0;
       final value = currentPrice * c.count;
@@ -1299,7 +1390,6 @@ class ChartsScreen extends StatelessWidget {
 
     final totalAssets = totalGoldValue + totalCoinRob + totalCoinNim + totalCoinTamam + totalCoin1g;
 
-    // --- نمودار دایره‌ای ---
     List<PieChartSectionData> pieSections = [];
     if (totalGoldValue > 0) {
       pieSections.add(PieChartSectionData(
@@ -1342,7 +1432,6 @@ class ChartsScreen extends StatelessWidget {
       ));
     }
 
-    // --- نمودار میله‌ای سود هر خرید ---
     List<BarChartGroupData> barGroups = [];
     int index = 0;
     for (var g in goldList) {
@@ -1382,7 +1471,6 @@ class ChartsScreen extends StatelessWidget {
       );
     }
 
-    // --- نمودار روند ارزش کل دارایی ---
     double totalAssetsYesterday = 0;
     for (var g in goldList) {
       final yesterdayPrice = priceProvider.prices[g.type]?.yesterdayAvg ?? 0;
@@ -1508,6 +1596,8 @@ class SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final settings = Provider.of<SettingsProvider>(context);
     final priceProvider = Provider.of<PriceProvider>(context);
+    final basePriceProvider = Provider.of<BasePriceProvider>(context);
+    final basePrices = basePriceProvider.basePrices;
 
     return Scaffold(
       appBar: AppBar(title: Text('تنظیمات'), centerTitle: true),
@@ -1562,15 +1652,56 @@ class SettingsScreen extends StatelessWidget {
               onTap: () => priceProvider.fetchPrices(),
             ),
           ),
+          SizedBox(height: 20),
+          Text('قیمت‌های پایه (۱/۱/۱۴۰۵)', style: Theme.of(context).textTheme.titleMedium),
+          SizedBox(height: 10),
+          ...basePrices.keys.map((key) {
+            return Card(
+              child: ListTile(
+                title: Text(_getPersianName(key)),
+                trailing: SizedBox(
+                  width: 120,
+                  child: TextFormField(
+                    initialValue: basePrices[key] == 0 ? '' : basePrices[key].toString(),
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      hintText: 'تومان',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    ),
+                    onFieldSubmitted: (value) {
+                      final val = double.tryParse(value) ?? 0;
+                      basePriceProvider.setBasePrice(key, val);
+                    },
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
           Card(
             child: ListTile(
-              title: Text('نسخه ۱.۰.۰'),
-              subtitle: Text('طراحی شده با فلاتر'),
+              title: Text('نسخه ۱.۱.۰'),
+              subtitle: Text('طراحی شده با فلاتر - دارای سود محقق شده ۱۴۰۴'),
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _getPersianName(String key) {
+    switch (key) {
+      case 'gold_18': return 'طلای ۱۸ عیار';
+      case 'gold_24': return 'طلای ۲۴ عیار';
+      case 'gold_ons': return 'انس طلا';
+      case 'gold_mazneh': return 'مظنه تهران';
+      case 'coin_old': return 'سکه طرح قدیم';
+      case 'coin_new': return 'سکه طرح جدید';
+      case 'coin_half': return 'نیم سکه';
+      case 'coin_quarter': return 'ربع سکه';
+      case 'coin_1g': return 'سکه یک گرمی';
+      default: return key;
+    }
   }
 }
 
@@ -1592,6 +1723,7 @@ void main() async {
       providers: [
         ChangeNotifierProvider(create: (_) => PriceProvider(prefs)),
         ChangeNotifierProvider(create: (_) => SettingsProvider(prefs)),
+        ChangeNotifierProvider(create: (_) => BasePriceProvider(prefs)),
         ChangeNotifierProvider(create: (_) => DataProvider(goldBox: goldBox, coinBox: coinBox)),
       ],
       child: MaterialApp(
@@ -1599,7 +1731,7 @@ void main() async {
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.amber),
-          fontFamily: 'Vazir', // در صورت وجود فونت
+          fontFamily: 'Vazir',
         ),
         home: MainScreen(),
         debugShowCheckedModeBanner: false,
