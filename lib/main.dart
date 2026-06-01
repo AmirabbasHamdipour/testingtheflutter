@@ -69,7 +69,7 @@ class CoinTransaction extends HiveObject {
   });
 }
 
-// -------------------- مدل پاسخ (بدون تغییر) --------------------
+// -------------------- مدل پاسخ --------------------
 class PriceResponse {
   final String name;
   final double? currentPrice;
@@ -165,6 +165,8 @@ class ApiService {
     return null;
   }
 
+  /// دریافت و پارس کل قیمت‌ها از وب‌سایت اتحادیه
+  /// **توجه:** از این پس قیمت‌ها مستقیماً به ریال از سایت دریافت می‌شوند و نیازی به ضرب در ۱۰ نیست.
   static Future<Map<String, PriceResponse>> fetchAllPrices() async {
     try {
       final response = await http.get(
@@ -195,11 +197,13 @@ class ApiService {
         final key = _nameToKey[name];
         if (key == null) continue;
 
+        // دریافت قیمت‌ها مستقیماً (سایت اکنون به ریال نمایش می‌دهد)
         var current = _parsePrice(cells[1].text.trim());
         var high = _parsePrice(cells[2].text.trim());
         var low = _parsePrice(cells[3].text.trim());
         var yesterdayAvg = _parsePrice(cells[4].text.trim());
 
+        // اطلاعات تغییر
         String? direction;
         double? changeVal;
         double? changePercent;
@@ -217,14 +221,7 @@ class ApiService {
           }
         }
 
-        if (key != 'gold_ons') {
-          current = current != null ? current * 10 : null;
-          high = high != null ? high * 10 : null;
-          low = low != null ? low * 10 : null;
-          yesterdayAvg = yesterdayAvg != null ? yesterdayAvg * 10 : null;
-          changeVal = changeVal != null ? changeVal * 10 : null;
-        }
-
+        // **حذف ضرب در ۱۰** – قیمت‌ها اکنون ریال هستند
         prices[key] = PriceResponse(
           name: name,
           currentPrice: current,
@@ -817,7 +814,7 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
             SizedBox(height: 20),
-            Text('قیمت‌های لحظه‌ای', style: Theme.of(context).textTheme.titleMedium),
+            Text('قیمت‌های لحظه‌ای (ریال)', style: Theme.of(context).textTheme.titleMedium),
             SizedBox(height: 10),
             GridView.count(
               shrinkWrap: true,
@@ -1027,7 +1024,7 @@ class GoldListScreen extends StatelessWidget {
                 children: [
                   TextFormField(
                     initialValue: price.toString(),
-                    decoration: InputDecoration(labelText: 'فی خرید (تومان)'),
+                    decoration: InputDecoration(labelText: 'فی خرید (ریال)'),
                     keyboardType: TextInputType.number,
                     validator: (v) => v!.isEmpty ? 'لطفاً وارد کنید' : null,
                     onSaved: (v) => price = double.parse(v!),
@@ -1290,7 +1287,7 @@ class CoinListScreen extends StatelessWidget {
                   ),
                   TextFormField(
                     initialValue: price.toString(),
-                    decoration: InputDecoration(labelText: 'فی خرید (تومان)'),
+                    decoration: InputDecoration(labelText: 'فی خرید (ریال)'),
                     keyboardType: TextInputType.number,
                     validator: (v) => v!.isEmpty ? 'لطفاً وارد کنید' : null,
                     onSaved: (v) => price = double.parse(v!),
@@ -1653,7 +1650,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           SizedBox(height: 20),
-          Text('قیمت‌های پایه (۱/۱/۱۴۰۵)', style: Theme.of(context).textTheme.titleMedium),
+          Text('قیمت‌های پایه (۱/۱/۱۴۰۵) - به ریال', style: Theme.of(context).textTheme.titleMedium),
           SizedBox(height: 10),
           ...basePrices.keys.map((key) {
             return Card(
@@ -1665,7 +1662,7 @@ class SettingsScreen extends StatelessWidget {
                     initialValue: basePrices[key] == 0 ? '' : basePrices[key].toString(),
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
-                      hintText: 'تومان',
+                      hintText: 'ریال',
                       isDense: true,
                       contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                     ),
@@ -1680,8 +1677,8 @@ class SettingsScreen extends StatelessWidget {
           }).toList(),
           Card(
             child: ListTile(
-              title: Text('نسخه ۱.۱.۰'),
-              subtitle: Text('طراحی شده با فلاتر - دارای سود محقق شده ۱۴۰۴'),
+              title: Text('نسخه ۱.۲.۰'),
+              subtitle: Text('ساخته شده توسط امیر - بنیانگذار نخودگرام'),
             ),
           ),
         ],
