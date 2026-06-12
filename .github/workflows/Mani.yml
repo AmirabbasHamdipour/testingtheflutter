@@ -1,0 +1,138 @@
+name: V2Ray Server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-v2ray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # حداکثر ۶ ساعت
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: Download cloudflared
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+
+      - name: Download Xray-core
+        run: |
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | \
+            jq -r '.assets[] | select(.name | test("Xray-linux-64.zip")) | .browser_download_url')
+          curl -L "$DOWNLOAD_URL" -o xray.zip
+          unzip xray.zip -d xray
+          chmod +x xray/xray
+
+      - name: Setup tunnel and capture URL
+        run: |
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          PORT=$((10000 + RANDOM % 50000))
+          echo "UUID=$UUID" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+
+          # اجرای تونل در پس‌زمینه
+          ./cloudflared tunnel --url http://localhost:$PORT --no-autoupdate > tunnel.log 2>&1 &
+          
+          # منتظر دریافت URL تونل
+          for i in {1..30}; do
+            if grep -q 'trycloudflare.com' tunnel.log; then
+              TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' tunnel.log | head -n1)
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ دریافت URL تونل شکست خورد"
+            cat tunnel.log
+            exit 1
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          echo "🌐 Tunnel URL: $TUNNEL_URL"
+
+      - name: Create Xray server config
+        run: |
+          cat > xray/config.json <<EOF
+          {
+            "inbounds": [{
+              "port": $PORT,
+              "protocol": "vmess",
+              "settings": {
+                "clients": [{
+                  "id": "$UUID",
+                  "alterId": 0
+                }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                  "path": "/"
+                }
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom",
+              "settings": {}
+            }]
+          }
+          EOF
+
+      - name: Start Xray
+        run: |
+          nohup ./xray/xray run -config xray/config.json &
+          sleep 3
+          if ! pgrep -f "xray/xray" > /dev/null; then
+            echo "❌ Xray اجرا نشد"
+            exit 1
+          fi
+          echo "✅ Xray در حال اجراست"
+
+      - name: Generate VMess URI and update README
+        run: |
+          # جدا کردن hostname از URL (بدون https://)
+          HOSTNAME="${TUNNEL_URL#https://}"
+          
+          CONFIG_JSON=$(jq -n \
+            --arg v "2" \
+            --arg ps "GitHub-V2Ray" \
+            --arg add "$HOSTNAME" \
+            --arg port "443" \
+            --arg id "$UUID" \
+            --arg aid "0" \
+            --arg net "ws" \
+            --arg type "none" \
+            --arg host "$HOSTNAME" \
+            --arg path "/" \
+            --arg tls "tls" \
+            '{v: $v, ps: $ps, add: $add, port: $port, id: $id, aid: $aid, net: $net, type: $type, host: $host, path: $path, tls: $tls}')
+          
+          VMESS_URI="vmess://$(echo -n "$CONFIG_JSON" | base64 -w0)"
+          echo "🔗 VMess URI: $VMESS_URI"
+
+          # افزودن به README
+          echo -e "\n## 🌍 V2Ray Server (فعال تا $(date -u -d '+6 hours' '+%Y-%m-%d %H:%M UTC'))\n\n\`\`\`\n${VMESS_URI}\n\`\`\`\n" >> README.md
+
+          # کامیت و پوش
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "🔄 به‌روزرسانی لینک V2Ray" || echo "بدون تغییر جدید"
+          git push
+
+      - name: Keep server alive for 6 hours
+        run: |
+          echo "⏳ سرور تا ۶ ساعت دیگر فعال خواهد ماند..."
+          sleep 21600
