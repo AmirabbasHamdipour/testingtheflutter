@@ -9,7 +9,7 @@ permissions:
 jobs:
   run-v2ray:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # حداکثر ۶ ساعت
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repository
@@ -28,9 +28,20 @@ jobs:
           chmod +x cloudflared
 
       - name: Download Xray-core
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | \
+          # دریافت لینک دانلود از API با توکن (رفع محدودیت نرخ)
+          DOWNLOAD_URL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/XTLS/Xray-core/releases/latest | \
             jq -r '.assets[] | select(.name | test("Xray-linux-64.zip")) | .browser_download_url')
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ دریافت لینک دانلود ناموفق بود. شاید ساختار release تغییر کرده باشد."
+            exit 1
+          fi
+
+          echo "📥 دانلود از: $DOWNLOAD_URL"
           curl -L "$DOWNLOAD_URL" -o xray.zip
           unzip xray.zip -d xray
           chmod +x xray/xray
@@ -42,11 +53,9 @@ jobs:
           echo "UUID=$UUID" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
 
-          # اجرای تونل در پس‌زمینه
           ./cloudflared tunnel --url http://localhost:$PORT --no-autoupdate > tunnel.log 2>&1 &
           
-          # منتظر دریافت URL تونل
-          for i in {1..30}; do
+          for i in $(seq 1 30); do
             if grep -q 'trycloudflare.com' tunnel.log; then
               TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' tunnel.log | head -n1)
               break
@@ -102,7 +111,6 @@ jobs:
 
       - name: Generate VMess URI and update README
         run: |
-          # جدا کردن hostname از URL (بدون https://)
           HOSTNAME="${TUNNEL_URL#https://}"
           
           CONFIG_JSON=$(jq -n \
@@ -122,10 +130,8 @@ jobs:
           VMESS_URI="vmess://$(echo -n "$CONFIG_JSON" | base64 -w0)"
           echo "🔗 VMess URI: $VMESS_URI"
 
-          # افزودن به README
           echo -e "\n## 🌍 V2Ray Server (فعال تا $(date -u -d '+6 hours' '+%Y-%m-%d %H:%M UTC'))\n\n\`\`\`\n${VMESS_URI}\n\`\`\`\n" >> README.md
 
-          # کامیت و پوش
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md
